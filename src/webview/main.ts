@@ -1,6 +1,6 @@
-// PPTX 编辑器 Webview 主逻辑
-// 默认「预览模式」：直接用原始文件字节经 pptxToHtml 忠实渲染（等同 examples/index.html）。
-// 「编辑模式」：切换到标准模型往返渲染，并叠加可选中/拖拽/改属性的编辑层。
+// PPTX editor webview main logic.
+// Default "preview mode": renders original file bytes faithfully via pptxToHtml (same as examples/index.html).
+// "Edit mode": switches to standard model round-trip rendering with a selectable/draggable/editable overlay.
 import { CSS } from './style';
 import { pptxToHtml } from '@fefeding/ppt-parser';
 import { chartRenderer } from './vendor/chart-renderer';
@@ -13,10 +13,10 @@ declare function acquireVsCodeApi(): {
 };
 const vscode = acquireVsCodeApi();
 
-// ---------- 全局状态 ----------
+// ---------- Global state ----------
 const state: {
   slideSize: { width: number; height: number };
-  slidesHtml: string[]; // 当前展示的 HTML（预览或编辑，按需渲染后填充）
+  slidesHtml: string[]; // currently displayed HTML (preview or edit, filled after on-demand rendering)
   model: any;
   current: number;
   selected: { slide: number; element: number } | null;
@@ -44,11 +44,11 @@ const state: {
   modelCanRedo: false
 };
 
-// 渲染源（宿主下发的字节）与渲染缓存：按需渲染，避免预览模式被迫等待模型往返
-let previewSrc: any = null; // 原始文件字节 —— 忠实预览
-let editSrc: any = null; // 模型往返后的字节 —— 编辑模式
+// Render sources (bytes from host) and render cache: on-demand rendering to avoid forcing preview to wait for model round-trip
+let previewSrc: any = null; // original file bytes — faithful preview
+let editSrc: any = null; // model round-tripped bytes — edit mode
 
-/** 一次渲染结果：每页 HTML + 图表数据 + 文档信息（图表需由 echarts 二次绘制） */
+/** A render result: per-slide HTML + chart data + document info (charts need a second pass by echarts). */
 interface RenderResult {
   slides: string[];
   charts: any[];
@@ -57,7 +57,7 @@ interface RenderResult {
 }
 const rendered: { preview?: RenderResult; edit?: RenderResult } = {};
 
-// ---------- DOM 引用 ----------
+// ---------- DOM references ----------
 let root!: HTMLElement;
 let slideListEl!: HTMLElement;
 let stageEl!: HTMLElement;
@@ -78,7 +78,7 @@ let presentHostEl!: HTMLElement;
 let docInfoEl!: HTMLElement;
 let toastEl!: HTMLElement;
 
-// ---------- 工具函数 ----------
+// ---------- Utility functions ----------
 function h<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   attrs: Record<string, any> = {},
@@ -121,7 +121,7 @@ function debounce(fn: (...a: any[]) => void, ms: number) {
   };
 }
 
-// ---------- 布局 ----------
+// ---------- Layout ----------
 function injectStyle() {
   const style = document.createElement('style');
   style.textContent = CSS;
@@ -132,15 +132,15 @@ function buildLayout() {
   root = document.getElementById('app')!;
   root.className = 'app mode-preview';
 
-  // 顶栏
+  // Top bar
   titleEl = h('div', { class: 'title' }, ['PPTX']);
-  const saveBtn = h('button', { class: 'btn primary', title: '保存 (Ctrl+S)', onclick: () => post({ type: 'save' }) }, ['保存']);
-  const saveAsBtn = h('button', { class: 'btn', title: '导出副本', onclick: () => post({ type: 'saveAs' }) }, ['导出']);
-  const presentBtn = h('button', { class: 'btn', title: '演示 (F5)', onclick: startPresent }, ['演示']);
-  const docBtn = h('button', { class: 'btn', title: '文档属性（元数据与自定义属性）', onclick: toggleDocInfo }, ['属性']);
-  modeBtn = h('button', { class: 'btn', title: '切换到编辑模式', onclick: toggleMode }, ['编辑']);
-  undoBtn = h('button', { class: 'btn edit-only', title: '撤销 (Ctrl+Z)', onclick: () => post({ type: 'undo' }) }, ['撤销']);
-  redoBtn = h('button', { class: 'btn edit-only', title: '重做 (Ctrl+Y)', onclick: () => post({ type: 'redo' }) }, ['重做']);
+  const saveBtn = h('button', { class: 'btn primary', title: 'Save (Ctrl+S)', onclick: () => post({ type: 'save' }) }, ['Save']);
+  const saveAsBtn = h('button', { class: 'btn', title: 'Export a copy', onclick: () => post({ type: 'saveAs' }) }, ['Export']);
+  const presentBtn = h('button', { class: 'btn', title: 'Present (F5)', onclick: startPresent }, ['Present']);
+  const docBtn = h('button', { class: 'btn', title: 'Document properties (metadata and custom properties)', onclick: toggleDocInfo }, ['Props']);
+  modeBtn = h('button', { class: 'btn', title: 'Switch to edit mode', onclick: toggleMode }, ['Edit']);
+  undoBtn = h('button', { class: 'btn edit-only', title: 'Undo (Ctrl+Z)', onclick: () => post({ type: 'undo' }) }, ['Undo']);
+  redoBtn = h('button', { class: 'btn edit-only', title: 'Redo (Ctrl+Y)', onclick: () => post({ type: 'redo' }) }, ['Redo']);
   const topbar = h('div', { class: 'topbar' }, [
     titleEl,
     saveBtn,
@@ -154,18 +154,18 @@ function buildLayout() {
     redoBtn
   ]);
 
-  // 幻灯片列表
+  // Slide list
   slideListEl = h('div', { class: 'sp-list' });
   const spHead = h('div', { class: 'sp-head' }, [
-    h('span', {}, ['幻灯片']),
+    h('span', {}, ['Slides']),
     h('button', {
-      class: 'btn edit-only', title: '新建幻灯片', style: 'padding:1px 7px',
+      class: 'btn edit-only', title: 'New slide', style: 'padding:1px 7px',
       onclick: () => sendOp({ kind: 'slideAdd', after: state.current })
-    }, ['＋'])
+    }, ['+'])
   ]);
   const slidesPanel = h('div', { class: 'slides-panel' }, [spHead, slideListEl]);
 
-  // 画布
+  // Canvas
   slideHostEl = h('div', { class: 'slide-host' });
   overlayEl = h('div', { class: 'overlay' });
   gridEl = h('div', { class: 'grid-overlay' });
@@ -174,17 +174,17 @@ function buildLayout() {
   const scroll = h('div', { class: 'canvas-scroll', id: 'canvasScroll' }, [stageEl]);
   const canvasArea = h('div', { class: 'canvas-area' }, [scroll]);
 
-  // 属性面板（仅编辑模式）
+  // Properties panel (edit mode only)
   inspectorEl = h('div', { class: 'inspector edit-only' });
   const main = h('div', { class: 'main' }, [slidesPanel, canvasArea, inspectorEl]);
 
-  // 状态栏
-  statusCountEl = h('span', {}, ['0 页']);
-  zoomLabelEl = h('span', { class: 'chip', title: '点击恢复 100%', onclick: () => setZoom(1) }, ['100%']);
-  const zoomOut = h('span', { class: 'chip', title: '缩小', onclick: () => setZoom(state.userZoom ?? state.zoom, true, 0.9) }, ['−']);
-  const zoomIn = h('span', { class: 'chip', title: '放大', onclick: () => setZoom(state.userZoom ?? state.zoom, true, 1.1) }, ['＋']);
-  const zoomFit = h('span', { class: 'chip', title: '适应窗口', onclick: () => setZoom(null) }, ['适应']);
-  gridBtn = h('span', { class: 'chip edit-only', title: '网格', onclick: toggleGrid }, ['网格']);
+  // Status bar
+  statusCountEl = h('span', {}, ['0 slides']);
+  zoomLabelEl = h('span', { class: 'chip', title: 'Click to reset to 100%', onclick: () => setZoom(1) }, ['100%']);
+  const zoomOut = h('span', { class: 'chip', title: 'Zoom out', onclick: () => setZoom(state.userZoom ?? state.zoom, true, 0.9) }, ['−']);
+  const zoomIn = h('span', { class: 'chip', title: 'Zoom in', onclick: () => setZoom(state.userZoom ?? state.zoom, true, 1.1) }, ['+']);
+  const zoomFit = h('span', { class: 'chip', title: 'Fit to window', onclick: () => setZoom(null) }, ['Fit']);
+  gridBtn = h('span', { class: 'chip edit-only', title: 'Grid', onclick: toggleGrid }, ['Grid']);
   const statusbar = h('div', { class: 'statusbar' }, [
     statusCountEl,
     h('span', { class: 'spacer' }),
@@ -192,7 +192,7 @@ function buildLayout() {
     zoomOut, zoomFit, zoomLabelEl, zoomIn
   ]);
 
-  // 演示层
+  // Presentation layer
   presentHostEl = h('div', { class: 'slide-host' });
   presentEl = h('div', { class: 'present', onclick: presentNext }, [presentHostEl]);
 
@@ -203,7 +203,7 @@ function buildLayout() {
   root.append(topbar, main, statusbar, docInfoEl, presentEl, toastEl);
 }
 
-// ---------- 模式切换 ----------
+// ---------- Mode switching ----------
 function toggleMode() {
   const next: 'preview' | 'edit' = state.mode === 'preview' ? 'edit' : 'preview';
   state.mode = next;
@@ -213,8 +213,8 @@ function toggleMode() {
 }
 function applyMode() {
   root.className = 'app mode-' + state.mode;
-  modeBtn.textContent = state.mode === 'preview' ? '编辑' : '预览';
-  modeBtn.title = state.mode === 'preview' ? '切换到编辑模式' : '切换到预览模式';
+  modeBtn.textContent = state.mode === 'preview' ? 'Edit' : 'Preview';
+  modeBtn.title = state.mode === 'preview' ? 'Switch to edit mode' : 'Switch to preview mode';
 
   const htmls = rendered[state.mode]?.slides;
   if (htmls) {
@@ -223,18 +223,18 @@ function applyMode() {
     renderAll();
     return;
   }
-  // 缓存未就绪：先渲染空态，渲染完成后再刷新（不阻塞界面）
+  // Cache not ready: render empty state first, then refresh when rendering completes (non-blocking)
   state.slidesHtml = [];
   renderAll();
   renderMode(state.mode);
 }
 
-/** 渲染当前模式；失败时通过 toast 提示，绝不静默吞掉 */
+/** Render the current mode; show toast on failure, never silently swallow errors. */
 async function renderMode(mode: 'preview' | 'edit') {
   const src = mode === 'preview' ? previewSrc : editSrc;
   if (!src) return;
   try {
-    // 该模式的字节尚未就绪时（如预览模式下宿主不做模型往返）静默跳过，不算失败
+    // Skip silently when bytes for this mode aren't ready yet (e.g. preview mode: host doesn't do model round-trip)
     if (!toBytes(src).length) return;
     rendered[mode] = await renderFromBytes(src, mode === 'preview');
     if (state.mode === mode) {
@@ -243,16 +243,16 @@ async function renderMode(mode: 'preview' | 'edit') {
       renderAll();
     }
   } catch (e: any) {
-    console.error('[pptx-webview] 渲染失败:', e);
-    toast('渲染失败：' + (e?.message || String(e)), 'error');
+    console.error('[pptx-webview] Render failed:', e);
+    toast('Render failed: ' + (e?.message || String(e)), 'error');
   }
 }
 
-// ---------- 缩放 ----------
-/** 适应宽度（与 examples/index.html 的 fitToWidth 一致，上限 2 倍） */
+// ---------- Zoom ----------
+/** Fit to width (consistent with examples/index.html fitToWidth, capped at 2x). */
 function getFitZoom(): number {
   const sc = document.getElementById('canvasScroll');
-  const avail = (sc?.clientWidth || 800) - 40; // 减去左右 padding
+  const avail = (sc?.clientWidth || 800) - 40; // subtract left/right padding
   return clamp(avail / state.slideSize.width, 0.1, 2);
 }
 function setZoom(value: number | null, isUser = true, factor?: number) {
@@ -273,22 +273,22 @@ function applyStageTransform() {
   stageInnerEl.style.width = state.slideSize.width + 'px';
   stageInnerEl.style.height = state.slideSize.height + 'px';
   stageInnerEl.style.transform = `scale(${state.zoom})`;
-  // 外层占位 = 缩放后尺寸，避免放大时被裁切、缩小后留有空白滚动区
+  // Outer placeholder = scaled size, to avoid clipping when zoomed in and blank scroll area when zoomed out
   stageEl.style.width = Math.round(state.slideSize.width * state.zoom) + 'px';
   stageEl.style.height = Math.round(state.slideSize.height * state.zoom) + 'px';
 }
 
-// ---------- 图表（echarts） ----------
+// ---------- Charts (echarts) ----------
 /**
- * 同一页 HTML 会出现在缩略图 / 画布 / 演示层，导致图表 id 重复，而
- * chart-renderer 用 document.getElementById 取容器（只会命中文档中的第一个）。
- * 因此给非主画布的副本加 id 前缀，保证主画布的 chart 容器唯一。
+ * The same slide HTML appears in thumbnail / canvas / presentation layers, causing chart id duplication.
+ * chart-renderer uses document.getElementById to find containers (only matches the first in the document).
+ * So non-canvas copies get an id prefix to ensure the main canvas chart containers are unique.
  */
 function prefixChartIds(html: string, prefix: string): string {
   return html.replace(/id=(["'])chart([^"']*)\1/g, `id=$1${prefix}chart$2$1`);
 }
 
-/** 容器被替换后，旧的 echarts 实例已脱离文档，销毁以免泄漏 */
+/** After containers are replaced, old echarts instances are detached from the document; dispose to avoid leaks. */
 function disposeDetachedCharts() {
   const insts = (chartRenderer as any).chartInstances as Map<string, any> | undefined;
   if (!insts) return;
@@ -305,11 +305,11 @@ function disposeDetachedCharts() {
   }
 }
 
-/** 用 echarts 绘制 host 内存在的图表（解析器只产出空的占位 div） */
+/** Paint charts that exist in the host using echarts (parser only emits empty placeholder divs). */
 function paintCharts(host: HTMLElement, idPrefix = '') {
   const r = rendered[state.mode];
   if (!r || !r.charts.length) return;
-  if (typeof (window as any).echarts === 'undefined') return; // echarts 未加载时静默跳过
+  if (typeof (window as any).echarts === 'undefined') return; // skip silently if echarts not loaded
   const list = r.charts.filter((c) => !!host.querySelector('#' + idPrefix + c.chartId));
   if (!list.length) return;
   try {
@@ -317,16 +317,16 @@ function paintCharts(host: HTMLElement, idPrefix = '') {
       idPrefix ? list.map((c) => ({ ...c, chartId: idPrefix + c.chartId })) : list
     );
   } catch (e: any) {
-    console.warn('[pptx-webview] 图表渲染失败:', e);
+    console.warn('[pptx-webview] Chart rendering failed:', e);
   }
 }
 
-// ---------- 渲染 ----------
+// ---------- Rendering ----------
 function renderAll() {
   renderSlideList();
   renderCanvas();
   renderInspector();
-  statusCountEl.textContent = `${state.slidesHtml.length} 页`;
+  statusCountEl.textContent = `${state.slidesHtml.length} slides`;
   undoBtn.disabled = !state.modelCanUndo;
   redoBtn.disabled = !state.modelCanRedo;
   if (docInfoEl.classList.contains('on')) renderDocInfo();
@@ -386,19 +386,19 @@ function buildOverlay() {
 }
 
 function renderInspector() {
-  // 预览模式不显示属性面板内容
+  // No properties panel in preview mode
   if (state.mode !== 'edit') {
     inspectorEl.innerHTML = '';
     return;
   }
-  // 编辑文本时不重建，避免失焦
+  // Don't rebuild while editing text to avoid losing focus
   if (state.editingText && state.selected) return;
   inspectorEl.innerHTML = '';
   const slide = state.model?.slides?.[state.current];
 
-  inspectorEl.append(h('h3', {}, ['幻灯片 ' + (state.current + 1) + ' / ' + state.slidesHtml.length]));
+  inspectorEl.append(h('h3', {}, ['Slide ' + (state.current + 1) + ' / ' + state.slidesHtml.length]));
 
-  // 元素列表
+  // Element list
   const list = h('ul', { class: 'el-list' });
   if (slide && Array.isArray(slide.elements)) {
     slide.elements.forEach((el: any, idx: number) => {
@@ -414,7 +414,7 @@ function renderInspector() {
       list.append(li);
     });
   }
-  inspectorEl.append(h('h4', {}, ['元素 (点击选择)']), list);
+  inspectorEl.append(h('h4', {}, ['Elements (click to select)']), list);
 
   if (!state.selected) {
     renderSlideInspector(slide);
@@ -432,119 +432,119 @@ function renderInspector() {
 function elSnippet(el: any): { name: string; type: string } {
   switch (el.type) {
     case 'text':
-      return { name: (el.text || '').toString().split('\n')[0].slice(0, 24) || '文本', type: '文本' };
+      return { name: (el.text || '').toString().split('\n')[0].slice(0, 24) || 'Text', type: 'Text' };
     case 'shape':
-      return { name: (el.shapeType || 'shape').toString(), type: '形状' };
+      return { name: (el.shapeType || 'shape').toString(), type: 'Shape' };
     case 'image':
-      return { name: '图片', type: '图片' };
+      return { name: 'Image', type: 'Image' };
     case 'chart':
-      return { name: (el.chartType || 'chart').toString(), type: '图表' };
+      return { name: (el.chartType || 'chart').toString(), type: 'Chart' };
     case 'table':
-      return { name: '表格', type: '表格' };
+      return { name: 'Table', type: 'Table' };
     case 'group':
-      return { name: '组合', type: '组合' };
+      return { name: 'Group', type: 'Group' };
     case 'diagram':
-      return { name: '图示', type: '图示' };
+      return { name: 'Diagram', type: 'Diagram' };
     case 'video':
-      return { name: '视频', type: '视频' };
+      return { name: 'Video', type: 'Video' };
     case 'audio':
-      return { name: '音频', type: '音频' };
+      return { name: 'Audio', type: 'Audio' };
     default:
-      return { name: (el.type || 'element').toString(), type: el.type || '元素' };
+      return { name: (el.type || 'element').toString(), type: el.type || 'Element' };
   }
 }
 
-// ---- 幻灯片级属性 ----
+// ---- Slide-level properties ----
 function renderSlideInspector(slide: any) {
   if (!slide) return;
-  inspectorEl.append(h('h4', {}, ['幻灯片属性']));
+  inspectorEl.append(h('h4', {}, ['Slide Properties']));
 
-  const bg = colorField('背景', slide.background && typeof slide.background === 'string' ? slide.background : '#ffffff', (v) =>
+  const bg = colorField('Background', slide.background && typeof slide.background === 'string' ? slide.background : '#ffffff', (v) =>
     sendOp({ kind: 'slideUpdate', index: state.current, patch: { background: v } })
   );
   inspectorEl.append(bg);
 
   const hidden = h('input', { type: 'checkbox', ...(slide.hidden ? { checked: 'checked' } : {}) });
   hidden.addEventListener('change', () => sendOp({ kind: 'slideUpdate', index: state.current, patch: { hidden: hidden.checked } }));
-  inspectorEl.append(h('div', { class: 'field' }, [h('label', {}, ['隐藏']), hidden]));
+  inspectorEl.append(h('div', { class: 'field' }, [h('label', {}, ['Hidden']), hidden]));
 
-  const notes = h('textarea', { placeholder: '演讲者备注…' }, [slide.notes || '']);
+  const notes = h('textarea', { placeholder: 'Speaker notes...' }, [slide.notes || '']);
   notes.addEventListener('input', debounce(() => sendOp({ kind: 'slideUpdate', index: state.current, patch: { notes: notes.value } }), 400));
-  inspectorEl.append(h('div', { class: 'field', style: 'align-items:flex-start' }, [h('label', {}, ['备注']), notes]));
+  inspectorEl.append(h('div', { class: 'field', style: 'align-items:flex-start' }, [h('label', {}, ['Notes']), notes]));
 
-  // 幻灯片操作
-  inspectorEl.append(h('h4', {}, ['幻灯片操作']));
-  const addText = h('button', { class: 'btn', onclick: () => addTextElement() }, ['＋ 文本框']);
-  const addShape = h('button', { class: 'btn', onclick: () => addShapeElement('rect') }, ['＋ 矩形']);
-  const addImg = h('button', { class: 'btn', onclick: pickImage }, ['＋ 图片']);
+  // Slide actions
+  inspectorEl.append(h('h4', {}, ['Slide Actions']));
+  const addText = h('button', { class: 'btn', onclick: () => addTextElement() }, ['+ Text Box']);
+  const addShape = h('button', { class: 'btn', onclick: () => addShapeElement('rect') }, ['+ Rectangle']);
+  const addImg = h('button', { class: 'btn', onclick: pickImage }, ['+ Image']);
   inspectorEl.append(h('div', { class: 'row' }, [addText, addShape, addImg]));
 
-  const dup = h('button', { class: 'btn', onclick: () => sendOp({ kind: 'slideDuplicate', index: state.current }) }, ['复制页']);
-  const del = h('button', { class: 'btn', onclick: () => { if (confirm('删除当前幻灯片？')) sendOp({ kind: 'slideDelete', index: state.current }); } }, ['删除页']);
-  const up = h('button', { class: 'btn', onclick: () => sendOp({ kind: 'slideMove', from: state.current, to: Math.max(0, state.current - 1) }) }, ['上移']);
-  const down = h('button', { class: 'btn', onclick: () => sendOp({ kind: 'slideMove', from: state.current, to: Math.min(state.slidesHtml.length - 1, state.current + 1) }) }, ['下移']);
+  const dup = h('button', { class: 'btn', onclick: () => sendOp({ kind: 'slideDuplicate', index: state.current }) }, ['Duplicate']);
+  const del = h('button', { class: 'btn', onclick: () => { if (confirm('Delete this slide?')) sendOp({ kind: 'slideDelete', index: state.current }); } }, ['Delete']);
+  const up = h('button', { class: 'btn', onclick: () => sendOp({ kind: 'slideMove', from: state.current, to: Math.max(0, state.current - 1) }) }, ['Move Up']);
+  const down = h('button', { class: 'btn', onclick: () => sendOp({ kind: 'slideMove', from: state.current, to: Math.min(state.slidesHtml.length - 1, state.current + 1) }) }, ['Move Down']);
   inspectorEl.append(h('div', { class: 'row' }, [dup, del]));
   inspectorEl.append(h('div', { class: 'row' }, [up, down]));
 }
 
-// ---- 元素级属性 ----
+// ---- Element-level properties ----
 function renderElementInspector(el: any) {
-  inspectorEl.append(h('h4', {}, ['元素：' + (el.type || '未知')]));
+  inspectorEl.append(h('h4', {}, ['Element: ' + (el.type || 'unknown')]));
 
-  // 几何
+  // Geometry
   const geom = h('div', {});
   geom.append(numField('X', el.x, (v) => updateEl({ x: v })));
   geom.append(numField('Y', el.y, (v) => updateEl({ y: v })));
-  geom.append(numField('宽', el.width, (v) => updateEl({ width: Math.max(1, v) })));
-  geom.append(numField('高', el.height, (v) => updateEl({ height: Math.max(1, v) })));
-  geom.append(numField('旋转', el.rotation, (v) => updateEl({ rotation: v })));
+  geom.append(numField('Width', el.width, (v) => updateEl({ width: Math.max(1, v) })));
+  geom.append(numField('Height', el.height, (v) => updateEl({ height: Math.max(1, v) })));
+  geom.append(numField('Rotation', el.rotation, (v) => updateEl({ rotation: v })));
   inspectorEl.append(geom);
 
-  // 类型相关
+  // Type-specific
   if (el.type === 'text') {
-    const ta = h('textarea', { placeholder: '文本内容…' }, [el.text || '']);
+    const ta = h('textarea', { placeholder: 'Text content...' }, [el.text || '']);
     ta.addEventListener('focus', () => (state.editingText = true));
     ta.addEventListener('blur', () => { state.editingText = false; });
     ta.addEventListener('input', debounce(() => { updateElLocal({ text: ta.value }); sendOp({ kind: 'elementUpdate', slide: state.current, element: state.selected!.element, patch: { text: ta.value } }); }, 400));
-    inspectorEl.append(h('div', { class: 'field', style: 'align-items:flex-start' }, [h('label', {}, ['文本']), ta]));
+    inspectorEl.append(h('div', { class: 'field', style: 'align-items:flex-start' }, [h('label', {}, ['Text']), ta]));
 
-    inspectorEl.append(colorField('颜色', el.color || '#1e1e1e', (v) => updateEl({ color: v })));
-    inspectorEl.append(numField('字号', el.fontSize, (v) => updateEl({ fontSize: v })));
-    inspectorEl.append(selectField('对齐', ['left', 'center', 'right', 'justify'], el.align || 'left', (v) => updateEl({ align: v })));
-    inspectorEl.append(selectField('垂直', ['top', 'middle', 'bottom'], el.valign || 'top', (v) => updateEl({ valign: v })));
-    inspectorEl.append(checkField('加粗', !!el.bold, (v) => updateEl({ bold: v })));
-    inspectorEl.append(checkField('斜体', !!el.italic, (v) => updateEl({ italic: v })));
-    inspectorEl.append(checkField('下划线', !!el.underline, (v) => updateEl({ underline: v })));
+    inspectorEl.append(colorField('Color', el.color || '#1e1e1e', (v) => updateEl({ color: v })));
+    inspectorEl.append(numField('Font Size', el.fontSize, (v) => updateEl({ fontSize: v })));
+    inspectorEl.append(selectField('Align', ['left', 'center', 'right', 'justify'], el.align || 'left', (v) => updateEl({ align: v })));
+    inspectorEl.append(selectField('Vertical', ['top', 'middle', 'bottom'], el.valign || 'top', (v) => updateEl({ valign: v })));
+    inspectorEl.append(checkField('Bold', !!el.bold, (v) => updateEl({ bold: v })));
+    inspectorEl.append(checkField('Italic', !!el.italic, (v) => updateEl({ italic: v })));
+    inspectorEl.append(checkField('Underline', !!el.underline, (v) => updateEl({ underline: v })));
   } else if (el.type === 'shape') {
-    inspectorEl.append(textField('形状', el.shapeType || 'rect', (v) => updateEl({ shapeType: v })));
+    inspectorEl.append(textField('Shape', el.shapeType || 'rect', (v) => updateEl({ shapeType: v })));
     const fillVal = typeof el.fill === 'string' ? el.fill : (el.fill && el.fill.color) || '#4285f4';
-    inspectorEl.append(colorField('填充', fillVal, (v) => updateEl({ fill: v })));
+    inspectorEl.append(colorField('Fill', fillVal, (v) => updateEl({ fill: v })));
     const lineColor = el.line && el.line !== 'none' ? (el.line.color || '#000') : '#000';
     const lineWidth = el.line && el.line !== 'none' ? (el.line.width || 1) : 1;
-    inspectorEl.append(colorField('边框色', lineColor, (v) => updateEl({ line: { color: v, width: lineWidth } })));
-    inspectorEl.append(numField('边框宽', lineWidth, (v) => updateEl({ line: v > 0 ? { color: lineColor, width: v } : 'none' })));
+    inspectorEl.append(colorField('Border Color', lineColor, (v) => updateEl({ line: { color: v, width: lineWidth } })));
+    inspectorEl.append(numField('Border Width', lineWidth, (v) => updateEl({ line: v > 0 ? { color: lineColor, width: v } : 'none' })));
   } else if (el.type === 'image') {
-    const replace = h('button', { class: 'btn', onclick: pickImage }, ['替换图片']);
+    const replace = h('button', { class: 'btn', onclick: pickImage }, ['Replace Image']);
     inspectorEl.append(h('div', { class: 'row' }, [replace]));
-    inspectorEl.append(h('div', { class: 'empty' }, ['图片内容来自预览，替换请选择本地文件']));
+    inspectorEl.append(h('div', { class: 'empty' }, ['Image content comes from preview. Select a local file to replace.']));
   } else {
-    inspectorEl.append(h('div', { class: 'empty' }, ['该类型暂仅支持移动 / 缩放 / 删除']));
+    inspectorEl.append(h('div', { class: 'empty' }, ['This type only supports move / resize / delete']));
   }
 
-  // 元素操作
-  inspectorEl.append(h('h4', {}, ['元素操作']));
-  const del = h('button', { class: 'btn', onclick: () => sendOp({ kind: 'elementDelete', slide: state.current, element: state.selected!.element }) }, ['删除']);
-  const fwd = h('button', { class: 'btn', onclick: () => reorderEl(1) }, ['上移一层']);
-  const bwd = h('button', { class: 'btn', onclick: () => reorderEl(-1) }, ['下移一层']);
+  // Element actions
+  inspectorEl.append(h('h4', {}, ['Element Actions']));
+  const del = h('button', { class: 'btn', onclick: () => sendOp({ kind: 'elementDelete', slide: state.current, element: state.selected!.element }) }, ['Delete']);
+  const fwd = h('button', { class: 'btn', onclick: () => reorderEl(1) }, ['Bring Forward']);
+  const bwd = h('button', { class: 'btn', onclick: () => reorderEl(-1) }, ['Send Backward']);
   inspectorEl.append(h('div', { class: 'row' }, [del]));
   inspectorEl.append(h('div', { class: 'row' }, [fwd, bwd]));
 }
 
-// ---------- 字段构造 ----------
+// ---------- Field builders ----------
 function colorField(label: string, value: string, onInput: (v: string) => void) {
   const input = h('input', { type: 'color', value: toHex(value) });
   input.addEventListener('input', () => onInput(input.value));
-  const clear = h('button', { class: 'btn', style: 'padding:2px 6px', title: '设为无', onclick: () => onInput('none') }, ['无']);
+  const clear = h('button', { class: 'btn', style: 'padding:2px 6px', title: 'Set to none', onclick: () => onInput('none') }, ['None']);
   return h('div', { class: 'field' }, [h('label', {}, [label]), input, clear]);
 }
 function textField(label: string, value: string, onInput: (v: string) => void) {
@@ -573,7 +573,7 @@ function toHex(v: any): string {
   return '#ffffff';
 }
 
-// ---------- 选择 / 操作 ----------
+// ---------- Selection / Operations ----------
 function selectSlide(i: number) {
   state.current = clamp(i, 0, state.slidesHtml.length - 1);
   state.selected = null;
@@ -616,7 +616,7 @@ function addTextElement() {
   sendOp({
     kind: 'elementAdd',
     slide: state.current,
-    element: { type: 'text', x: 120, y: 120, width: 480, height: 90, text: '双击编辑文本', fontSize: 24, color: '#1e1e1e', align: 'left', valign: 'top' }
+    element: { type: 'text', x: 120, y: 120, width: 480, height: 90, text: 'Double-click to edit text', fontSize: 24, color: '#1e1e1e', align: 'left', valign: 'top' }
   });
 }
 function addShapeElement(shapeType: string) {
@@ -648,7 +648,7 @@ function pickImage() {
   input.click();
 }
 
-// ---------- 拖拽 / 缩放 ----------
+// ---------- Drag / Resize ----------
 function onElementPointerDown(e: PointerEvent, idx: number) {
   e.preventDefault();
   e.stopPropagation();
@@ -698,7 +698,7 @@ function buildOverlaySelected() {
   });
 }
 
-// ---------- 网格 / 演示 ----------
+// ---------- Grid / Presentation ----------
 function toggleGrid() {
   state.grid = !state.grid;
   gridEl.className = 'grid-overlay' + (state.grid ? ' on' : '');
@@ -710,23 +710,23 @@ function toggleDocInfo() {
 }
 
 const META_LABELS: Record<string, string> = {
-  title: '标题',
-  subject: '主题',
-  author: '作者',
-  keywords: '关键词',
-  description: '备注',
-  lastModifiedBy: '最后修改者',
-  created: '创建时间',
-  modified: '修改时间',
-  category: '类别',
-  status: '状态',
-  contentType: '内容类型',
-  language: '语言'
+  title: 'Title',
+  subject: 'Subject',
+  author: 'Author',
+  keywords: 'Keywords',
+  description: 'Description',
+  lastModifiedBy: 'Last Modified By',
+  created: 'Created',
+  modified: 'Modified',
+  category: 'Category',
+  status: 'Status',
+  contentType: 'Content Type',
+  language: 'Language'
 };
 
 function kvTable(obj: any, labels?: Record<string, string>) {
   const keys = Object.keys(obj || {}).filter((k) => obj[k] != null && obj[k] !== '');
-  if (!keys.length) return h('div', { class: 'empty' }, ['（无）']);
+  if (!keys.length) return h('div', { class: 'empty' }, ['(none)']);
   const table = h('table', { class: 'kv' });
   for (const k of keys) {
     table.append(
@@ -739,18 +739,18 @@ function kvTable(obj: any, labels?: Record<string, string>) {
   return table;
 }
 
-/** 渲染文档属性：元数据（core.xml）+ 自定义属性（custom.xml） */
+/** Render document properties: metadata (core.xml) + custom properties (custom.xml) */
 function renderDocInfo() {
   const r = rendered[state.mode];
   docInfoEl.innerHTML = '';
   docInfoEl.append(
     h('div', { class: 'doc-info-head' }, [
-      h('span', {}, ['文档属性']),
-      h('button', { class: 'btn', style: 'padding:2px 8px', onclick: () => docInfoEl.classList.remove('on') }, ['关闭'])
+      h('span', {}, ['Document Properties']),
+      h('button', { class: 'btn', style: 'padding:2px 8px', onclick: () => docInfoEl.classList.remove('on') }, ['Close'])
     ])
   );
-  docInfoEl.append(h('h4', {}, ['元数据']), kvTable(r?.metadata, META_LABELS));
-  docInfoEl.append(h('h4', {}, ['自定义属性']), kvTable(r?.customProps));
+  docInfoEl.append(h('h4', {}, ['Metadata']), kvTable(r?.metadata, META_LABELS));
+  docInfoEl.append(h('h4', {}, ['Custom Properties']), kvTable(r?.customProps));
 }
 
 function startPresent() {
@@ -781,8 +781,8 @@ function presentPrev() {
   if (state.current > 0) { state.current--; renderPresent(); }
 }
 
-// ---------- 消息处理 ----------
-/** 把宿主传来的字节统一成 Uint8Array（兼容 TypedArray / ArrayBuffer / 数组 / base64 / 纯对象降级形态） */
+// ---------- Message handling ----------
+/** Normalize host-provided bytes to Uint8Array (handles TypedArray / ArrayBuffer / array / base64 / plain object fallback). */
 function toBytes(v: any): Uint8Array {
   if (v instanceof Uint8Array) return v;
   if (v instanceof ArrayBuffer) return new Uint8Array(v);
@@ -798,7 +798,7 @@ function toBytes(v: any): Uint8Array {
     return out;
   }
   if (v && typeof v === 'object') {
-    // postMessage 降级为纯对象时形如 {"0":80,"1":75,...}
+    // postMessage fallback as plain object: {"0":80,"1":75,...}
     const keys = Object.keys(v).filter((k) => /^\d+$/.test(k));
     if (keys.length) {
       const out = new Uint8Array(keys.length);
@@ -806,10 +806,10 @@ function toBytes(v: any): Uint8Array {
       return out;
     }
   }
-  throw new Error('无法识别的 PPTX 字节数据');
+  throw new Error('Unrecognized PPTX byte data');
 }
 
-/** 注入解析器产出的全局样式。缺少它会导致颜色/行高/SVG 滤镜全部丢失（渲染错乱） */
+/** Inject parser-produced global styles. Missing it causes colors/line-height/SVG filters to be lost (rendering corruption). */
 let injectedGlobalCss = '';
 function ensureGlobalStyles(css: string) {
   if (!css || css === injectedGlobalCss) return;
@@ -824,14 +824,14 @@ function ensureGlobalStyles(css: string) {
 }
 
 /**
- * 用 pptxToHtml 把字节渲染成每页 HTML。
- * 与 examples/index.html 保持一致：注入 styles.global；预览模式跳过隐藏页（p:sld show="0"）。
+ * Render bytes into per-slide HTML using pptxToHtml.
+ * Consistent with examples/index.html: injects styles.global; preview mode skips hidden slides (p:sld show="0").
  */
 async function renderFromBytes(bytes: any, skipHidden = false): Promise<RenderResult> {
   const data = toBytes(bytes);
-  if (!data.length) throw new Error('PPTX 字节为空，无法解析');
+  if (!data.length) throw new Error('PPTX bytes are empty, cannot parse');
   const res = await pptxToHtml(data, { mediaProcess: true, themeProcess: true });
-  if (!res) throw new Error('pptxToHtml 未返回解析结果');
+  if (!res) throw new Error('pptxToHtml returned no result');
   ensureGlobalStyles(res.styles?.global || '');
   if (res.slideSize && res.slideSize.width) {
     state.slideSize = { width: res.slideSize.width, height: res.slideSize.height };
@@ -855,7 +855,7 @@ async function applyInit(msg: Extract<HostToWebview, { type: 'init' }>) {
   state.modelCanRedo = msg.canRedo;
   titleEl.textContent = msg.title;
 
-  // 记录渲染源；只渲染当前模式（预览用原始字节忠实渲染，编辑用模型往返结果）
+  // Store render sources; only render the current mode (preview uses original bytes for faithful rendering, edit uses model round-trip result)
   previewSrc = msg.originalBytes;
   editSrc = msg.bytes;
   delete rendered.preview;
@@ -886,7 +886,7 @@ async function applyUpdate(msg: Extract<HostToWebview, { type: 'update' }>) {
   applyMode();
 }
 
-// ---------- 键盘 ----------
+// ---------- Keyboard ----------
 function onKey(e: KeyboardEvent) {
   const tag = (e.target as HTMLElement)?.tagName;
   const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
@@ -897,7 +897,7 @@ function onKey(e: KeyboardEvent) {
     return;
   }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); post({ type: 'save' }); return; }
-  if (state.mode !== 'edit') return; // 预览模式禁用编辑快捷键
+  if (state.mode !== 'edit') return; // disable edit shortcuts in preview mode
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); post({ type: 'undo' }); return; }
   if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) { e.preventDefault(); post({ type: 'redo' }); return; }
   if ((e.key === 'F5')) { e.preventDefault(); startPresent(); return; }
@@ -922,7 +922,7 @@ function onKey(e: KeyboardEvent) {
   }
 }
 
-// ---------- 启动 ----------
+// ---------- Startup ----------
 function main() {
   injectStyle();
   buildLayout();
@@ -940,9 +940,9 @@ function main() {
           case 'info': toast(msg.message, msg.kind || 'info'); break;
         }
       } catch (e: any) {
-        // 不能让异常静默吞掉：否则界面会停在「0 页」而毫无提示
-        console.error('[pptx-webview] 处理消息失败:', e);
-        toast('渲染失败：' + (e?.message || String(e)), 'error');
+        // Never silently swallow errors: otherwise the UI would stall at "0 slides" with no feedback
+        console.error('[pptx-webview] Message handling failed:', e);
+        toast('Render failed: ' + (e?.message || String(e)), 'error');
       }
     })();
   });

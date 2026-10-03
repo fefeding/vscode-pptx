@@ -1,7 +1,7 @@
 {
   "name": "vscode-pptx",
   "displayName": "PPTX Editor",
-  "description": "基于 pptx-parser 的 VSCode PPTX 预览与编辑插件（默认打开 .pptx）",
+  "description": "VSCode PPTX preview and editor extension powered by pptx-parser (default handler for .pptx)",
   "version": "0.1.0",
   "publisher": "fefeding",
   "license": "MIT",
@@ -20,7 +20,7 @@
     "customEditors": [
       {
         "viewType": "pptx-parser.pptxEditor",
-        "displayName": "PPTX 编辑器",
+        "displayName": "PPTX Editor",
         "selector": [
           {
             "filenamePattern": "*.pptx"
@@ -32,11 +32,11 @@
     "commands": [
       {
         "command": "pptx-parser.revert",
-        "title": "PPTX: 放弃更改并重新加载"
+        "title": "PPTX: Discard Changes and Reload"
       },
       {
         "command": "pptx-parser.exportCopy",
-        "title": "PPTX: 导出副本…"
+        "title": "PPTX: Export Copy..."
       }
     ],
     "menus": {

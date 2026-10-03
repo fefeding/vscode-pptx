@@ -1,8 +1,8 @@
-// 将一次编辑操作应用到标准 PptxDocument 模型（原地修改）。
-// 模型结构见 @fefeding/ppt-parser 的 PptxDocument（types/pptx-document.ts）。
+// Applies a single edit operation to the standard PptxDocument model (in-place).
+// Model structure: see @fefeding/ppt-parser PptxDocument (types/pptx-document.ts).
 import type { PptxOp } from './protocol';
 
-/** 深拷贝（模型为纯 JSON，无函数） */
+/** Deep clone (model is pure JSON, no functions). */
 export function cloneModel(model: any): any {
   return JSON.parse(JSON.stringify(model));
 }
@@ -11,10 +11,10 @@ function blankSlide(): any {
   return { background: '#ffffff', elements: [] };
 }
 
-/** 应用一次编辑到模型（原地修改）。非法操作抛错，由调用方决定是否提交。 */
+/** Apply an edit to the model (in-place). Throws on invalid operations; caller decides whether to commit. */
 export function applyOpToModel(model: any, op: PptxOp): void {
   const slides: any[] = model.slides;
-  if (!Array.isArray(slides)) throw new Error('模型缺少 slides 数组');
+  if (!Array.isArray(slides)) throw new Error('Model missing slides array');
 
   switch (op.kind) {
     case 'slideAdd': {
@@ -23,57 +23,57 @@ export function applyOpToModel(model: any, op: PptxOp): void {
       break;
     }
     case 'slideDelete': {
-      if (slides.length <= 1) throw new Error('至少需保留一页幻灯片');
-      if (op.index < 0 || op.index >= slides.length) throw new Error('页码越界');
+      if (slides.length <= 1) throw new Error('At least one slide must remain');
+      if (op.index < 0 || op.index >= slides.length) throw new Error('Slide index out of bounds');
       slides.splice(op.index, 1);
       break;
     }
     case 'slideDuplicate': {
-      if (op.index < 0 || op.index >= slides.length) throw new Error('页码越界');
+      if (op.index < 0 || op.index >= slides.length) throw new Error('Slide index out of bounds');
       slides.splice(op.index + 1, 0, cloneModel(slides[op.index]));
       break;
     }
     case 'slideMove': {
       if (op.from < 0 || op.from >= slides.length || op.to < 0 || op.to >= slides.length)
-        throw new Error('页码越界');
+        throw new Error('Slide index out of bounds');
       const [m] = slides.splice(op.from, 1);
       slides.splice(op.to, 0, m);
       break;
     }
     case 'slideUpdate': {
       const s = slides[op.index];
-      if (!s) throw new Error('页码越界');
+      if (!s) throw new Error('Slide index out of bounds');
       Object.assign(s, op.patch);
       break;
     }
     case 'elementAdd': {
       const s = slides[op.slide];
-      if (!s) throw new Error('页码越界');
+      if (!s) throw new Error('Slide index out of bounds');
       if (!Array.isArray(s.elements)) s.elements = [];
       s.elements.push(op.element);
       break;
     }
     case 'elementUpdate': {
       const s = slides[op.slide];
-      if (!s || !Array.isArray(s.elements)) throw new Error('页码越界');
+      if (!s || !Array.isArray(s.elements)) throw new Error('Slide index out of bounds');
       const el = s.elements[op.element];
-      if (!el) throw new Error('元素索引越界');
+      if (!el) throw new Error('Element index out of bounds');
       Object.assign(el, op.patch);
       break;
     }
     case 'elementDelete': {
       const s = slides[op.slide];
-      if (!s || !Array.isArray(s.elements)) throw new Error('页码越界');
-      if (op.element < 0 || op.element >= s.elements.length) throw new Error('元素索引越界');
+      if (!s || !Array.isArray(s.elements)) throw new Error('Slide index out of bounds');
+      if (op.element < 0 || op.element >= s.elements.length) throw new Error('Element index out of bounds');
       s.elements.splice(op.element, 1);
       break;
     }
     case 'elementReorder': {
       const s = slides[op.slide];
-      if (!s || !Array.isArray(s.elements)) throw new Error('页码越界');
+      if (!s || !Array.isArray(s.elements)) throw new Error('Slide index out of bounds');
       const arr = s.elements;
       if (op.from < 0 || op.from >= arr.length || op.to < 0 || op.to >= arr.length)
-        throw new Error('元素索引越界');
+        throw new Error('Element index out of bounds');
       const [m] = arr.splice(op.from, 1);
       arr.splice(op.to, 0, m);
       break;
@@ -85,7 +85,7 @@ export function applyOpToModel(model: any, op: PptxOp): void {
     }
     default: {
       const _exhaustive: never = op;
-      throw new Error('未知操作: ' + JSON.stringify(_exhaustive));
+      throw new Error('Unknown operation: ' + JSON.stringify(_exhaustive));
     }
   }
 }
@@ -95,8 +95,8 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 /**
- * 裁剪模型用于发送到 Webview：移除大体积字段（图片 base64、__raw 原始子树），
- * 仅保留编辑所需的几何与文本信息，显著降低消息体积。
+ * Trim model for sending to webview: removes large fields (image base64, __raw subtrees),
+ * keeping only geometry and text info needed for editing — significantly reduces message size.
  */
 export function trimModel(model: any): any {
   const clone = cloneModel(model);
@@ -108,7 +108,7 @@ export function trimModel(model: any): any {
         delete el.__raw;
         delete el.rawFallback;
         if (el.type === 'image' || el.type === 'video' || el.type === 'audio' || el.type === 'ole') {
-          delete el.data; // 预览图来自 slidesHtml，无需在模型里重复下发
+          delete el.data; // preview images come from slidesHtml; no need to duplicate in model
         }
       }
     }

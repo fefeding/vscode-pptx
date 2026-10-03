@@ -21,7 +21,7 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
   >();
   public readonly onDidChangeCustomDocument = this._onDidChangeCustomDocument.event;
 
-  /** 当前获得焦点的文档（用于命令如「导出副本」） */
+  /** The currently focused document (used by commands like "Export Copy"). */
   private _activeDoc: PptxCustomDocument | undefined;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
@@ -33,7 +33,7 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
   ): Promise<PptxCustomDocument> {
     const document = await PptxCustomDocument.create(uri);
 
-    // 文档内容变化时通知编辑器（用于脏标记 / 保存提示）
+    // Notify the editor when document content changes (for dirty indicator / save prompt)
     document.onDidChange(() => this._onDidChangeCustomDocument.fire({ document }));
     document.onDidRevert(() => this._onDidChangeCustomDocument.fire({ document }));
     document.onDidSave(() => this._onDidChangeCustomDocument.fire({ document }));
@@ -77,7 +77,7 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
       });
     };
 
-    // 先注册监听再下发，避免宿主侧异常时 webview 永远收不到消息
+    // Register listener before sending, so the webview never misses a message if the host throws
     webviewPanel.webview.onDidReceiveMessage(async (message: WebviewToHost) => {
       try {
         switch (message.type) {
@@ -91,7 +91,7 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
           case 'op': {
             const res = await document.applyOp(message.op);
             if (res.ok) await pushUpdate();
-            else send({ type: 'info', kind: 'error', message: res.error || '操作失败' });
+            else send({ type: 'info', kind: 'error', message: res.error || 'Operation failed' });
             break;
           }
           case 'undo':
@@ -103,7 +103,7 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
           case 'save':
             await document.save();
             send({ type: 'saved' });
-            send({ type: 'info', kind: 'info', message: '已保存' });
+            send({ type: 'info', kind: 'info', message: 'Saved' });
             break;
           case 'saveAs':
             await this.saveAs(document);
@@ -111,7 +111,7 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
           case 'revert':
             await document.revert();
             await pushUpdate();
-            send({ type: 'info', kind: 'info', message: '已重新加载' });
+            send({ type: 'info', kind: 'info', message: 'Reloaded' });
             break;
         }
       } catch (err: any) {
@@ -119,15 +119,15 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
       }
     });
 
-    // 首次下发：失败只在 webview 提示，不让整个编辑器卡在空界面
+    // First send: failures only show a toast in the webview; don't let the entire editor stall on an empty view
     try {
       await sendInit();
     } catch (err: any) {
-      send({ type: 'info', kind: 'error', message: '初始化失败：' + (err?.message || String(err)) });
+      send({ type: 'info', kind: 'error', message: 'Initialization failed: ' + (err?.message || String(err)) });
     }
   }
 
-  // ---- CustomEditorProvider 必须实现的方法 ----
+  // ---- CustomEditorProvider required methods ----
   async saveCustomDocument(document: PptxCustomDocument, _token: vscode.CancellationToken): Promise<void> {
     await document.save();
   }
@@ -161,12 +161,12 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
   private async saveAs(document: PptxCustomDocument): Promise<void> {
     const uri = await vscode.window.showSaveDialog({
       defaultUri: document.uri,
-      saveLabel: '导出副本',
+      saveLabel: 'Export Copy',
       filters: { 'PowerPoint': ['pptx'] }
     });
     if (!uri) return;
     await document.save(uri);
-    vscode.window.showInformationMessage(`已导出副本：${uri.fsPath}`);
+    vscode.window.showInformationMessage(`Exported copy: ${uri.fsPath}`);
   }
 
   public async revertActive(): Promise<void> {
@@ -180,15 +180,15 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview.js')
     );
-    // 图表依赖：echarts / echarts-gl 以全局脚本形式加载（顺序敏感，须在 webview.js 之前）
+    // Chart dependencies: echarts / echarts-gl loaded as global scripts (order-sensitive, must precede webview.js)
     const echartsUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'media', 'echarts.min.js')
     );
     const echartsGlUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'media', 'echarts-gl.min.js')
     );
-    // 基础样式表：提供 .block{position:absolute}、.content{display:flex} 等版式骨架，
-    // 缺失会导致所有元素退化为纵向堆叠（与 examples/index.html 的渲染差距主要来自这里）
+    // Base stylesheet: provides .block{position:absolute}, .content{display:flex} etc. layout skeleton.
+    // Missing it causes all elements to collapse into a vertical stack (main source of rendering gap vs examples/index.html)
     const baseCssUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'media', 'pptxjs.css')
     );
@@ -198,12 +198,12 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
       `img-src ${webview.cspSource} data: blob:;`,
       `media-src ${webview.cspSource} data: blob:;`,
       `style-src ${webview.cspSource} 'unsafe-inline';`,
-      // 'unsafe-eval' 是 echarts-gl 的硬性要求：它内部用 new Function() 解析 expr() 表达式，
-      // 否则 3D 图表会抛 "Invalid expression."（CSP 拦截后被 catch 吞掉真实原因）
+      // 'unsafe-eval' is required by echarts-gl: it uses new Function() to parse expr() expressions,
+      // otherwise 3D charts throw "Invalid expression." (CSP blocks it and the real cause is swallowed by catch)
       `script-src 'nonce-${nonce}' 'unsafe-eval' ${webview.cspSource};`
     ].join(' ');
     return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta http-equiv="Content-Security-Policy" content="${csp}" />

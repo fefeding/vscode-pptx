@@ -1,6 +1,6 @@
-// 扩展宿主（Node）与 Webview（浏览器）之间的消息协议
+// Message protocol between extension host (Node) and webview (browser).
 
-/** 一次编辑操作 */
+/** A single edit operation. */
 export type PptxOp =
   | { kind: 'slideAdd'; after?: number; slide?: any }
   | { kind: 'slideDelete'; index: number }
@@ -13,7 +13,7 @@ export type PptxOp =
   | { kind: 'elementReorder'; slide: number; from: number; to: number }
   | { kind: 'metadataUpdate'; patch: any };
 
-/** Webview → 宿主 */
+/** Webview → Host */
 export type WebviewToHost =
   | { type: 'ready' }
   | { type: 'op'; op: PptxOp }
@@ -24,17 +24,17 @@ export type WebviewToHost =
   | { type: 'revert' }
   | { type: 'setMode'; mode: 'preview' | 'edit' };
 
-/** 宿主 → Webview */
+/** Host → Webview */
 export type HostToWebview =
   | {
       type: 'init';
       slideSize: { width: number; height: number };
-      mode: 'preview' | 'edit'; // 初始模式（默认 preview）
-      // 以 base64 传输：VSCode webview 的 typed array 传输（$$vscode_array_buffer_reference$$）在
-      // 自定义编辑器场景下不会还原成 Uint8Array，直接传二进制会导致解析失败
-      originalBytes: string; // 文件原始字节（base64）—— 预览模式用 pptxToHtml 忠实渲染
-      bytes: string; // 模型序列化后的 PPTX 字节（base64）—— 编辑模式渲染用（标准模型往返）
-      model: any; // 已裁剪的标准 PptxDocument（去除大体积字段）
+      mode: 'preview' | 'edit'; // initial mode (default: preview)
+      // Transmitted as base64: VSCode webview typed array transport ($$vscode_array_buffer_reference$$)
+      // does not restore to Uint8Array in custom editor scenarios; passing binary directly causes parse failure.
+      originalBytes: string; // original file bytes (base64) — used by preview mode for faithful rendering via pptxToHtml
+      bytes: string; // model-serialized PPTX bytes (base64) — used by edit mode rendering (standard model round-trip)
+      model: any; // trimmed standard PptxDocument (large fields removed)
       title: string;
       canUndo: boolean;
       canRedo: boolean;
