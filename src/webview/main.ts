@@ -3,7 +3,7 @@
 // "Edit mode": switches to standard model round-trip rendering with a selectable/draggable/editable overlay.
 import { CSS } from './style';
 import { pptxToHtml } from '@fefeding/ppt-parser';
-import { chartRenderer } from './vendor/chart-renderer';
+import { chartRenderer } from '@fefeding/ppt-parser/chart-renderer';
 import type { HostToWebview, WebviewToHost } from '../protocol';
 
 declare function acquireVsCodeApi(): {
@@ -153,6 +153,12 @@ function buildLayout() {
   stageInnerEl = h('div', { class: 'stage-inner' }, [slideHostEl, gridEl, overlayEl]);
   stageEl = h('div', { class: 'stage' }, [stageInnerEl]);
   const scroll = h('div', { class: 'canvas-scroll', id: 'canvasScroll' }, [stageEl]);
+  // Ctrl/Cmd + wheel zooms the canvas (plain wheel still scrolls)
+  scroll.addEventListener('wheel', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    setZoom(state.userZoom ?? state.zoom, true, e.deltaY < 0 ? 1.1 : 0.9);
+  }, { passive: false });
   const canvasArea = h('div', { class: 'canvas-area' }, [scroll]);
 
   // Properties panel (edit mode only)
@@ -236,11 +242,12 @@ async function renderMode(mode: 'preview' | 'edit') {
 }
 
 // ---------- Zoom ----------
-/** Fit to width (consistent with examples/index.html fitToWidth, capped at 2x). */
+/** Fit the slide into the canvas area on both axes (capped at 2x). */
 function getFitZoom(): number {
   const sc = document.getElementById('canvasScroll');
-  const avail = (sc?.clientWidth || 800) - 40; // subtract left/right padding
-  return clamp(avail / state.slideSize.width, 0.1, 2);
+  const availW = (sc?.clientWidth || 800) - 40; // subtract left/right padding
+  const availH = (sc?.clientHeight || 600) - 40; // subtract top/bottom padding
+  return clamp(Math.min(availW / state.slideSize.width, availH / state.slideSize.height), 0.1, 2);
 }
 function setZoom(value: number | null, isUser = true, factor?: number) {
   if (value === null) {
@@ -266,26 +273,6 @@ function applyStageTransform() {
 }
 
 // ---------- Charts (echarts) ----------
-/**
- * The same slide HTML appears in thumbnail / canvas / presentation layers, causing chart id duplication.
- * chart-renderer uses document.getElementById to find containers (only matches the first in the document).
- * So non-canvas copies get an id prefix to ensure the main canvas chart containers are unique.
- */
-function prefixChartIds(html: string, prefix: string): string {
-  return html.replace(/id=(["'])chart([^"']*)\1/g, `id=$1${prefix}chart$2$1`);
-}
-
-/**
- * The parser hardcodes `muted` on <video>, which forces silent playback and
- * re-mutes on every re-render, so users can never hear audio. Remove it (the
- * parser already emits `controls`) so audio is playable via the built-in controls.
- */
-function fixMediaHtml(html: string): string {
-  return html.replace(/<(video|audio)\b([\s\S]*?)>/gi, (_m, name: string, attrs: string) =>
-    `<${name}${attrs.replace(/\smuted(?=\s|>)/i, '')}>`
-  );
-}
-
 /** After containers are replaced, old echarts instances are detached from the document; dispose to avoid leaks. */
 function disposeDetachedCharts() {
   const insts = (chartRenderer as any).chartInstances as Map<string, any> | undefined;
@@ -304,16 +291,16 @@ function disposeDetachedCharts() {
 }
 
 /** Paint charts that exist in the host using echarts (parser only emits empty placeholder divs). */
-function paintCharts(host: HTMLElement, idPrefix = '') {
+function paintCharts(host: HTMLElement) {
   const r = rendered[state.mode];
   if (!r || !r.charts.length) return;
   if (typeof (window as any).echarts === 'undefined') return; // skip silently if echarts not loaded
-  const list = r.charts.filter((c) => !!host.querySelector('#' + idPrefix + c.chartId));
+  const list = r.charts.filter((c) => !!host.querySelector(`[id="${c.chartId}"]`));
   if (!list.length) return;
   try {
-    chartRenderer.renderCharts(
-      idPrefix ? list.map((c) => ({ ...c, chartId: idPrefix + c.chartId })) : list
-    );
+    // Pass host as the lookup scope, so repeated copies of the same slide HTML
+    // (thumbnail / canvas / presentation) never resolve to each other's containers.
+    chartRenderer.renderCharts(list, host);
   } catch (e: any) {
     console.warn('[pptx-webview] Chart rendering failed:', e);
   }
@@ -335,7 +322,7 @@ function renderSlideList() {
   const thumbsW = 160;
   const scale = thumbsW / state.slideSize.width;
   state.slidesHtml.forEach((html, i) => {
-    const inner = h('div', { class: 'inner', html: prefixChartIds(html, 'thumb-') });
+    const inner = h('div', { class: 'inner', html });
     inner.style.width = state.slideSize.width + 'px';
     inner.style.height = state.slideSize.height + 'px';
     inner.style.transform = `scale(${scale})`;
@@ -759,11 +746,10 @@ function renderPresent() {
   disposeDetachedCharts();
   presentHostEl.style.width = state.slideSize.width + 'px';
   presentHostEl.style.height = state.slideSize.height + 'px';
-  presentHostEl.innerHTML = prefixChartIds(state.slidesHtml[state.current] || '', 'pres-');
-  paintCharts(presentHostEl, 'pres-');
+  presentHostEl.innerHTML = state.slidesHtml[state.current] || '';
+  paintCharts(presentHostEl);
   // Try to autoplay with sound (presentation is entered via a user gesture, so this is allowed)
   presentHostEl.querySelectorAll('video').forEach((v) => {
-    v.muted = false;
     v.play().catch(() => { /* autoplay may still be blocked; controls remain available */ });
   });
   const z = Math.min(window.innerWidth / state.slideSize.width, window.innerHeight / state.slideSize.height) * 0.96;
@@ -879,7 +865,7 @@ async function renderFromBytes(bytes: any, skipHidden = false): Promise<RenderRe
   }
   const slides = (res.slides || []) as any[];
   return {
-    slides: (skipHidden ? slides.filter((s) => !s.hidden) : slides).map((s) => fixMediaHtml(s.html)),
+    slides: (skipHidden ? slides.filter((s) => !s.hidden) : slides).map((s) => s.html),
     charts: (res.charts || []) as any[],
     metadata: res.metadata,
     customProps: res.customProps

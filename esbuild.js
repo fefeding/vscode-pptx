@@ -72,25 +72,6 @@ async function buildWithContext() {
     target: 'node16'
   });
 
-  // 浏览器构建里解析器仍残留对 Node 内建（fs/path）的 import（仅 CLI 辅助函数使用，
-  // pptxToHtml 运行时并不调用）。在 webview 中将其桩化为空实现。
-  const nodeStubPlugin = {
-    name: 'node-builtin-stub',
-    setup(build) {
-      build.onResolve({ filter: /^(fs|path|os|crypto|stream|util|http|https|zlib|url)$/ }, (args) => ({
-        path: args.path,
-        namespace: 'stub-node'
-      }));
-      build.onLoad({ filter: /.*/, namespace: 'stub-node' }, () => ({
-        contents:
-          'const p = new Proxy(function(){}, { get: () => () => { throw new Error("node builtin stub"); }, apply: () => { throw new Error("node builtin stub"); } });' +
-          'export default p;' +
-          'export const readFileSync=()=>{}, writeFileSync=()=>{}, readdirSync=()=>[], existsSync=()=>false, statSync=()=>({}), promises={};' +
-          'export const join=()=>"", resolve=()=>"", dirname=()=>"", basename=()=>"";'
-      }));
-    }
-  };
-
   const webCtx = await esbuild.context({
     ...base,
     entryPoints: [path.join(__dirname, 'src', 'webview', 'main.ts')],
@@ -100,9 +81,10 @@ async function buildWithContext() {
     target: 'es2020',
     // 强制使用解析器自带的浏览器构建（已内联 jszip/tinycolor2，且不依赖 Node 的 fs）
     alias: {
-      '@fefeding/ppt-parser': path.resolve(__dirname, '..', 'pptx-parser', 'dist', 'ppt-parser.browser.js')
-    },
-    plugins: [nodeStubPlugin]
+      '@fefeding/ppt-parser': path.resolve(__dirname, '..', 'pptx-parser', 'dist', 'ppt-parser.browser.js'),
+      // 图表渲染器由解析器包直接提供，避免在本仓库内再维护一份副本
+      '@fefeding/ppt-parser/chart-renderer': path.resolve(__dirname, '..', 'pptx-parser', 'examples', 'chart-lib', 'chart-renderer.js')
+    }
   });
 
   if (watch) {

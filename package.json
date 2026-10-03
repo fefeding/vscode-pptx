@@ -61,7 +61,7 @@
     "install:parser": "npm install file:../pptx-parser"
   },
   "dependencies": {
-    "@fefeding/ppt-parser": "^1.0.15",
+    "@fefeding/ppt-parser": "^1.0.17",
     "jszip": "^3.10.2",
     "tinycolor2": "^1.6.0"
   },

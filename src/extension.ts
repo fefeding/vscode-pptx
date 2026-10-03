@@ -187,11 +187,8 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     const echartsGlUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'media', 'echarts-gl.min.js')
     );
-    // Base stylesheet: provides .block{position:absolute}, .content{display:flex} etc. layout skeleton.
-    // Missing it causes all elements to collapse into a vertical stack (main source of rendering gap vs examples/index.html)
-    const baseCssUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.context.extensionUri, 'media', 'pptxjs.css')
-    );
+    // Base layout skeleton (.block/.content etc.) now comes from the parser's styles.global,
+    // injected by the webview via ensureGlobalStyles().
     const nonce = getNonce();
     const csp = [
       `default-src 'none';`,
@@ -209,7 +206,6 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
 <meta http-equiv="Content-Security-Policy" content="${csp}" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>PPTX Editor</title>
-<link rel="stylesheet" href="${baseCssUri}" />
 </head>
 <body>
 <div id="app"></div>

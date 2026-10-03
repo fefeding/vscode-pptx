@@ -110,6 +110,10 @@ export function trimModel(model: any): any {
         if (el.type === 'image' || el.type === 'video' || el.type === 'audio' || el.type === 'ole') {
           delete el.data; // preview images come from slidesHtml; no need to duplicate in model
         }
+        // Shape image fill (a:blipFill) embeds the same base64; rendering comes from slidesHtml
+        if (el.fill && typeof el.fill === 'object' && el.fill.type === 'image') {
+          delete el.fill.data;
+        }
       }
     }
   }

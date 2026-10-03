@@ -68,7 +68,9 @@ body {
 .thumb .inner { transform-origin: top left; pointer-events: none; }
 
 .canvas-area { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; background: #161616; }
-.canvas-scroll { flex: 1 1 auto; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 20px; }
+/* Center via margin:auto on the child (.stage) instead of the flex container:
+   a centered flex item that overflows the viewport makes the top/left unreachable by scrolling. */
+.canvas-scroll { flex: 1 1 auto; overflow: auto; display: flex; padding: 20px; }
 /* Slide content should not inherit the editor UI font settings (font size / family would change
    text metrics and line wrapping; align with examples/index.html defaults: 16px + sans-serif stack) */
 .slide {
@@ -77,7 +79,7 @@ body {
 }
 
 /* Outer size = scaled size (ensures correct scroll range and centering); inner is 1:1 layout then scaled as a whole */
-.stage { position: relative; background: #fff; box-shadow: 0 4px 20px rgba(0,0,0,.4); overflow: hidden; flex: 0 0 auto; }
+.stage { position: relative; background: #fff; box-shadow: 0 4px 20px rgba(0,0,0,.4); overflow: hidden; flex: 0 0 auto; margin: auto; }
 .stage-inner { position: absolute; top: 0; left: 0; transform-origin: top left; }
 .slide-host { position: absolute; top: 0; left: 0; }
 .slide-host .slide { margin: 0 !important; }
