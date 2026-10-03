@@ -1,0 +1,74 @@
+{
+  "name": "vscode-pptx",
+  "displayName": "PPTX Editor",
+  "description": "基于 pptx-parser 的 VSCode PPTX 预览与编辑插件（默认打开 .pptx）",
+  "version": "0.1.0",
+  "publisher": "fefeding",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "icon": "",
+  "activationEvents": [
+    "onCustomEditor:pptx-parser.pptxEditor"
+  ],
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "pptx-parser.pptxEditor",
+        "displayName": "PPTX 编辑器",
+        "selector": [
+          {
+            "filenamePattern": "*.pptx"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "pptx-parser.revert",
+        "title": "PPTX: 放弃更改并重新加载"
+      },
+      {
+        "command": "pptx-parser.exportCopy",
+        "title": "PPTX: 导出副本…"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "pptx-parser.revert",
+          "when": "resourceExtname == .pptx",
+          "group": "navigation"
+        },
+        {
+          "command": "pptx-parser.exportCopy",
+          "when": "resourceExtname == .pptx",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "node esbuild.js --production",
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "install:parser": "npm install file:../pptx-parser"
+  },
+  "dependencies": {
+    "@fefeding/ppt-parser": "^1.0.15",
+    "jszip": "^3.10.2",
+    "tinycolor2": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.9.3"
+  }
+}
