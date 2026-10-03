@@ -275,6 +275,17 @@ function prefixChartIds(html: string, prefix: string): string {
   return html.replace(/id=(["'])chart([^"']*)\1/g, `id=$1${prefix}chart$2$1`);
 }
 
+/**
+ * The parser hardcodes `muted` on <video>, which forces silent playback and
+ * re-mutes on every re-render, so users can never hear audio. Remove it (the
+ * parser already emits `controls`) so audio is playable via the built-in controls.
+ */
+function fixMediaHtml(html: string): string {
+  return html.replace(/<(video|audio)\b([\s\S]*?)>/gi, (_m, name: string, attrs: string) =>
+    `<${name}${attrs.replace(/\smuted(?=\s|>)/i, '')}>`
+  );
+}
+
 /** After containers are replaced, old echarts instances are detached from the document; dispose to avoid leaks. */
 function disposeDetachedCharts() {
   const insts = (chartRenderer as any).chartInstances as Map<string, any> | undefined;
@@ -750,6 +761,11 @@ function renderPresent() {
   presentHostEl.style.height = state.slideSize.height + 'px';
   presentHostEl.innerHTML = prefixChartIds(state.slidesHtml[state.current] || '', 'pres-');
   paintCharts(presentHostEl, 'pres-');
+  // Try to autoplay with sound (presentation is entered via a user gesture, so this is allowed)
+  presentHostEl.querySelectorAll('video').forEach((v) => {
+    v.muted = false;
+    v.play().catch(() => { /* autoplay may still be blocked; controls remain available */ });
+  });
   const z = Math.min(window.innerWidth / state.slideSize.width, window.innerHeight / state.slideSize.height) * 0.96;
   presentHostEl.style.transform = `scale(${z})`;
 }
@@ -863,7 +879,7 @@ async function renderFromBytes(bytes: any, skipHidden = false): Promise<RenderRe
   }
   const slides = (res.slides || []) as any[];
   return {
-    slides: (skipHidden ? slides.filter((s) => !s.hidden) : slides).map((s) => s.html),
+    slides: (skipHidden ? slides.filter((s) => !s.hidden) : slides).map((s) => fixMediaHtml(s.html)),
     charts: (res.charts || []) as any[],
     metadata: res.metadata,
     customProps: res.customProps
