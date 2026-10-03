@@ -66,7 +66,7 @@ let slideHostEl!: HTMLElement;
 let overlayEl!: HTMLElement;
 let gridEl!: HTMLElement;
 let inspectorEl!: HTMLElement;
-let titleEl!: HTMLElement;
+let ctxMenuEl!: HTMLElement;
 let statusCountEl!: HTMLElement;
 let zoomLabelEl!: HTMLElement;
 let undoBtn!: HTMLButtonElement;
@@ -132,38 +132,19 @@ function buildLayout() {
   root = document.getElementById('app')!;
   root.className = 'app mode-preview';
 
-  // Top bar
-  titleEl = h('div', { class: 'title' }, ['PPTX']);
-  const saveBtn = h('button', { class: 'btn primary', title: 'Save (Ctrl+S)', onclick: () => post({ type: 'save' }) }, ['Save']);
-  const saveAsBtn = h('button', { class: 'btn', title: 'Export a copy', onclick: () => post({ type: 'saveAs' }) }, ['Export']);
+  // Slide panel toolbar (replaces the top bar)
+  const newBtn = h('button', { class: 'btn', title: 'New slide', onclick: () => sendOp({ kind: 'slideAdd', after: state.current }) }, ['+']);
   const presentBtn = h('button', { class: 'btn', title: 'Present (F5)', onclick: startPresent }, ['Present']);
   const docBtn = h('button', { class: 'btn', title: 'Document properties (metadata and custom properties)', onclick: toggleDocInfo }, ['Props']);
   modeBtn = h('button', { class: 'btn', title: 'Switch to edit mode', onclick: toggleMode }, ['Edit']);
   undoBtn = h('button', { class: 'btn edit-only', title: 'Undo (Ctrl+Z)', onclick: () => post({ type: 'undo' }) }, ['Undo']);
   redoBtn = h('button', { class: 'btn edit-only', title: 'Redo (Ctrl+Y)', onclick: () => post({ type: 'redo' }) }, ['Redo']);
-  const topbar = h('div', { class: 'topbar' }, [
-    titleEl,
-    saveBtn,
-    saveAsBtn,
-    h('span', { class: 'sep' }),
-    presentBtn,
-    docBtn,
-    h('span', { class: 'sep' }),
-    modeBtn,
-    undoBtn,
-    redoBtn
-  ]);
+  const toolbar = h('div', { class: 'sp-toolbar' }, [newBtn, presentBtn, docBtn, modeBtn, undoBtn, redoBtn]);
 
   // Slide list
   slideListEl = h('div', { class: 'sp-list' });
-  const spHead = h('div', { class: 'sp-head' }, [
-    h('span', {}, ['Slides']),
-    h('button', {
-      class: 'btn edit-only', title: 'New slide', style: 'padding:1px 7px',
-      onclick: () => sendOp({ kind: 'slideAdd', after: state.current })
-    }, ['+'])
-  ]);
-  const slidesPanel = h('div', { class: 'slides-panel' }, [spHead, slideListEl]);
+  const spHead = h('div', { class: 'sp-head' }, [h('span', {}, ['Slides'])]);
+  const slidesPanel = h('div', { class: 'slides-panel' }, [spHead, toolbar, slideListEl]);
 
   // Canvas
   slideHostEl = h('div', { class: 'slide-host' });
@@ -200,7 +181,13 @@ function buildLayout() {
 
   toastEl = h('div', { class: 'toast' });
 
-  root.append(topbar, main, statusbar, docInfoEl, presentEl, toastEl);
+  // Right-click context menu (on canvas)
+  ctxMenuEl = h('div', { class: 'ctx-menu' });
+  canvasArea.addEventListener('contextmenu', (e) => { e.preventDefault(); showCtxMenu(e.clientX, e.clientY); });
+  document.addEventListener('click', () => hideCtxMenu());
+  window.addEventListener('scroll', () => hideCtxMenu(), true);
+
+  root.append(main, statusbar, docInfoEl, presentEl, toastEl, ctxMenuEl);
 }
 
 // ---------- Mode switching ----------
@@ -781,6 +768,44 @@ function presentPrev() {
   if (state.current > 0) { state.current--; renderPresent(); }
 }
 
+// ---------- Context menu ----------
+type CtxItem = { label?: string; action?: () => void; disabled?: boolean; sep?: boolean };
+function showCtxMenu(x: number, y: number) {
+  ctxMenuEl.innerHTML = '';
+  const items: CtxItem[] = [
+    { label: 'Present (F5)', action: startPresent },
+    { label: state.mode === 'preview' ? 'Edit' : 'Preview', action: toggleMode },
+    { label: 'Document Properties', action: toggleDocInfo },
+    { label: 'Save (Ctrl+S)', action: () => post({ type: 'save' }) },
+    { label: 'Export Copy...', action: () => post({ type: 'saveAs' }) },
+    { sep: true },
+    { label: 'Undo (Ctrl+Z)', action: () => post({ type: 'undo' }), disabled: !state.modelCanUndo },
+    { label: 'Redo (Ctrl+Y)', action: () => post({ type: 'redo' }), disabled: !state.modelCanRedo }
+  ];
+  for (const it of items) {
+    if (it.sep) { ctxMenuEl.append(h('div', { class: 'ctx-sep' })); continue; }
+    const item = h('div', { class: 'ctx-item' + (it.disabled ? ' disabled' : '') }, [it.label]);
+    if (!it.disabled && it.action) {
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        hideCtxMenu();
+        it.action!();
+      });
+    }
+    ctxMenuEl.append(item);
+  }
+  ctxMenuEl.classList.add('on');
+  const mw = ctxMenuEl.offsetWidth || 180;
+  const mh = ctxMenuEl.offsetHeight || 200;
+  const left = Math.min(x, window.innerWidth - mw - 8);
+  const top = Math.min(y, window.innerHeight - mh - 8);
+  ctxMenuEl.style.left = Math.max(4, left) + 'px';
+  ctxMenuEl.style.top = Math.max(4, top) + 'px';
+}
+function hideCtxMenu() {
+  ctxMenuEl.classList.remove('on');
+}
+
 // ---------- Message handling ----------
 /** Normalize host-provided bytes to Uint8Array (handles TypedArray / ArrayBuffer / array / base64 / plain object fallback). */
 function toBytes(v: any): Uint8Array {
@@ -853,7 +878,6 @@ async function applyInit(msg: Extract<HostToWebview, { type: 'init' }>) {
   state.mode = msg.mode || 'preview';
   state.modelCanUndo = msg.canUndo;
   state.modelCanRedo = msg.canRedo;
-  titleEl.textContent = msg.title;
 
   // Store render sources; only render the current mode (preview uses original bytes for faithful rendering, edit uses model round-trip result)
   previewSrc = msg.originalBytes;

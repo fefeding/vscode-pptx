@@ -26,13 +26,25 @@ body {
 /* Hide editing controls in preview mode */
 .app.mode-preview .edit-only { display: none !important; }
 
-/* Top bar */
-.topbar {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border);
-  flex: 0 0 auto;
+/* Slide panel toolbar (replaces the top bar) */
+.sp-toolbar {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  padding: 6px 8px; background: var(--panel); border-bottom: 1px solid var(--border);
 }
-.topbar .title { font-weight: 600; margin-right: auto; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw; }
+.sp-toolbar .btn { padding: 3px 8px; font-size: 12px; }
+
+/* Context menu (right-click on canvas) */
+.ctx-menu {
+  position: fixed; z-index: 70; min-width: 180px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px; box-shadow: 0 6px 24px rgba(0,0,0,.45); display: none;
+}
+.ctx-menu.on { display: block; }
+.ctx-item { padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; white-space: nowrap; }
+.ctx-item:hover { background: var(--panel-2); }
+.ctx-item.disabled { opacity: .4; cursor: default; }
+.ctx-item.disabled:hover { background: none; }
+.ctx-sep { height: 1px; background: var(--border); margin: 4px 2px; }
 .btn {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
   border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 12px; display: inline-flex; align-items: center; gap: 4px;
@@ -41,7 +53,6 @@ body {
 .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
 .btn.primary:hover { filter: brightness(1.1); }
 .btn:disabled { opacity: .45; cursor: default; }
-.sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
 
 /* Main area */
 .main { display: flex; flex: 1 1 auto; min-height: 0; }
