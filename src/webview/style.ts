@@ -182,6 +182,47 @@ body {
   background: rgba(66,133,244,.12); pointer-events: none;
 }
 
+/* Modal dialogs (tables, charts, shapes, media) */
+.modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center; z-index: 60;
+}
+.dlg {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.35); min-width: 400px; max-width: 92vw;
+  max-height: 86vh; display: flex; flex-direction: column;
+}
+.dlg-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px; border-bottom: 1px solid var(--border); font-weight: 600;
+}
+.dlg-x { cursor: pointer; opacity: .6; padding: 0 4px; }
+.dlg-x:hover { opacity: 1; }
+.dlg-body { padding: 12px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+.dlg-line { display: flex; align-items: center; gap: 8px; }
+.dlg-line > span { width: 78px; flex: 0 0 auto; font-size: 12px; opacity: .8; }
+.dlg-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dlg-col { display: flex; flex-direction: column; gap: 6px; }
+.dlg-block { border: 1px solid var(--border); border-radius: 6px; padding: 6px; margin-bottom: 6px; }
+.dlg-split { display: flex; gap: 16px; }
+.dlg-split > div { flex: 1 1 0; min-width: 0; }
+.dlg-in, .dlg-cell {
+  border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px;
+  font-size: 12px; background: transparent; color: inherit; min-width: 0;
+}
+.dlg-cell { width: 100%; box-sizing: border-box; }
+.dlg-table { display: grid; gap: 4px; }
+.dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.dlg-check-row { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+.btn.primary { background: var(--accent-2); color: #fff; border-color: var(--accent-2); }
+.dlg-shapes { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+.shape-item {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 6px 2px; border: 1px solid var(--border); border-radius: 6px;
+  background: transparent; color: inherit; cursor: pointer; font-size: 10px;
+}
+.shape-item:hover { border-color: var(--accent-2); background: rgba(66,133,244,.08); }
+
 /* Right-side properties panel */
 .inspector { width: 280px; background: var(--panel); border-left: 1px solid var(--border); overflow-y: auto; padding: 10px; flex: 0 0 auto; }
 .inspector h3 { font-size: 12px; margin: 0 0 8px; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; }

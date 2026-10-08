@@ -28,6 +28,15 @@ import {
   disposeDetachedCharts,
   disposeAllCharts
 } from './render';
+import {
+  hasOpenModal,
+  closeModal,
+  openTableSizeDialog,
+  openTableDialog,
+  openChartDialog,
+  openShapePicker,
+  openMediaDialog
+} from './dialogs';
 // Same ECharts renderer the preview side uses (option building incl. 3D matches examples/index.html)
 import { chartRenderer } from '@fefeding/ppt-parser/chart-renderer';
 import type { EditorMode, HostToWebview, WebviewToHost } from '../protocol';
@@ -153,7 +162,17 @@ function buildLayout() {
   undoBtn = h('button', { class: 'btn edit-only', title: 'Undo (Ctrl+Z)', onclick: () => runAction(() => store.undo()) }, ['Undo']);
   redoBtn = h('button', { class: 'btn edit-only', title: 'Redo (Ctrl+Y)', onclick: () => runAction(() => store.redo()) }, ['Redo']);
   const saveBtn = h('button', { class: 'btn edit-only', title: 'Save', onclick: flushAndSave }, ['Save']);
-  const toolbar = h('div', { class: 'sp-toolbar' }, [newBtn, presentBtn, docBtn, modeBtn, saveBtn, undoBtn, redoBtn]);
+  // Quick insert row (mirrors the editor's insert toolbar)
+  const insText = h('button', { class: 'btn edit-only', title: 'Insert text box', onclick: addTextElement }, ['T']);
+  const insShape = h('button', { class: 'btn edit-only', title: 'Insert shape', onclick: () => openShapePicker({ addShape: (t: string) => addShapeElement(t) }) }, ['▢']);
+  const insImg = h('button', { class: 'btn edit-only', title: 'Insert image', onclick: pickImage }, ['▣']);
+  const insTable = h('button', { class: 'btn edit-only', title: 'Insert table', onclick: insertTable }, ['⊞']);
+  const insChart = h('button', { class: 'btn edit-only', title: 'Insert chart', onclick: insertChart }, ['◫']);
+  const insMedia = h('button', { class: 'btn edit-only', title: 'Insert audio or video', onclick: () => openMediaDialog({ addMedia }) }, ['♪']);
+  const toolbar = h('div', { class: 'sp-toolbar' }, [
+    newBtn, presentBtn, docBtn, modeBtn, saveBtn, undoBtn, redoBtn,
+    insText, insShape, insImg, insTable, insChart, insMedia
+  ]);
 
   // Slide list
   slideListEl = h('div', { class: 'sp-list' });
@@ -919,7 +938,28 @@ function onCanvasDblClick(e: MouseEvent) {
   renderInspector();
   if (el.type === 'text') enterTextEditing(el);
   else if (el.type === 'image') pickImage();
+  else if (el.type === 'table') editTable(el.id);
+  else if (el.type === 'chart') editChart(el.id);
+  else if (el.type === 'video' || el.type === 'audio') toast('Media cannot be played while editing');
   else toast(`Double-click editing is not supported for ${el.type} yet`);
+}
+
+/** Open the table editor against the freshest model state. */
+function editTable(id: string) {
+  const el = store.findElement(id);
+  if (!el) return;
+  openTableDialog(el, {
+    update: (patch: any) => runAction(() => actions.updateElement(id, patch)),
+    resize: (rows: number, cols: number) => runAction(() => actions.resizeTable(el, rows, cols)),
+    reopen: () => editTable(id)
+  });
+}
+
+/** Open the chart data editor against the freshest model state. */
+function editChart(id: string) {
+  const el = store.findElement(id);
+  if (!el) return;
+  openChartDialog(el, { update: (patch: any) => runAction(() => actions.updateElement(id, patch)) });
 }
 
 /** Turn one text element into a contenteditable body and keep it focused. */
@@ -1315,6 +1355,73 @@ function pickImage() {
   input.click();
 }
 
+function insertTable() {
+  openTableSizeDialog({
+    create: (rows: number, cols: number) => {
+      const tblRows = Array.from({ length: rows }, () => ({
+        cells: Array.from({ length: cols }, () => ({ text: '' }))
+      }));
+      runAction(() =>
+        actions.addElement(
+          {
+            type: 'table',
+            x: 160,
+            y: 160,
+            width: Math.max(240, cols * 90),
+            height: Math.max(80, rows * 40),
+            rows: tblRows,
+            colWidths: new Array(cols).fill(1),
+            headerRow: true,
+            border: { color: '#cfd8e3', width: 1 },
+            headerFill: '#1A73E8',
+            fontSize: 16
+          },
+          { center: true }
+        )
+      );
+    }
+  });
+}
+
+function insertChart() {
+  runAction(() =>
+    actions.addElement(
+      {
+        type: 'chart',
+        x: 160,
+        y: 140,
+        width: 520,
+        height: 320,
+        chartType: 'barChart',
+        title: 'Chart title',
+        legend: true,
+        dataLabels: false,
+        categories: ['A', 'B', 'C', 'D'],
+        series: [{ name: 'Series 1', values: [5, 3, 8, 4] }]
+      },
+      { center: true }
+    )
+  );
+}
+
+function addMedia(type: 'video' | 'audio', data: string, ext: string) {
+  runAction(() =>
+    actions.addElement(
+      {
+        type,
+        data,
+        extension: ext,
+        name: `${type}.${ext}`,
+        x: 200,
+        y: 160,
+        width: type === 'video' ? 420 : 240,
+        height: type === 'video' ? 260 : 90
+      },
+      { center: true }
+    )
+  );
+}
+
 // ---------- Grid / Presentation / Document info ----------
 function toggleGrid() {
   state.grid = !state.grid;
@@ -1460,6 +1567,10 @@ function hideCtxMenu() {
 function onKeyDown(e: KeyboardEvent) {
   const target = e.target as HTMLElement;
   const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+  if (e.key === 'Escape' && hasOpenModal()) {
+    closeModal();
+    return;
+  }
   if (e.key === 'Escape') {
     if (presentEl.classList.contains('on')) {
       presentEl.className = 'present';
