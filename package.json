@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "fefeding",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fefeding/vscode-pptx.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
