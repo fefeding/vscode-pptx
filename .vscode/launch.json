@@ -5,12 +5,20 @@
       "name": "Run Extension",
       "type": "extensionHost",
       "request": "launch",
-      "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}"
-      ],
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
       "stopOnEntry": false,
       "preLaunchTask": "npm: compile"
+    },
+    {
+      "name": "Run Extension (watch)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "stopOnEntry": false,
+      "preLaunchTask": "npm: dev (watch)",
+      "presentation": { "group": "1-build", "order": 2 }
     }
   ]
 }
