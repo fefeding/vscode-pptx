@@ -152,7 +152,8 @@ function buildLayout() {
   modeBtn = h('button', { class: 'btn', title: 'Switch to edit mode', onclick: toggleMode }, ['Edit']);
   undoBtn = h('button', { class: 'btn edit-only', title: 'Undo (Ctrl+Z)', onclick: () => runAction(() => store.undo()) }, ['Undo']);
   redoBtn = h('button', { class: 'btn edit-only', title: 'Redo (Ctrl+Y)', onclick: () => runAction(() => store.redo()) }, ['Redo']);
-  const toolbar = h('div', { class: 'sp-toolbar' }, [newBtn, presentBtn, docBtn, modeBtn, undoBtn, redoBtn]);
+  const saveBtn = h('button', { class: 'btn edit-only', title: 'Save', onclick: flushAndSave }, ['Save']);
+  const toolbar = h('div', { class: 'sp-toolbar' }, [newBtn, presentBtn, docBtn, modeBtn, saveBtn, undoBtn, redoBtn]);
 
   // Slide list
   slideListEl = h('div', { class: 'sp-list' });
@@ -176,14 +177,28 @@ function buildLayout() {
     },
     { passive: false }
   );
-  // Click on empty canvas clears the selection
+  // Canvas interaction: hit-test to select, drag handles live on the overlay boxes.
   slideHostEl.addEventListener('pointerdown', (e) => {
     if (state.mode !== 'edit') return;
-    if ((e.target as HTMLElement).closest('.el')) return;
+    const node = (e.target as HTMLElement).closest('.el[data-id]') as HTMLElement | null;
+    if (node) {
+      const id = node.dataset.id!;
+      if (store.editingId === id) return; // let contenteditable place the caret itself
+      e.preventDefault();
+      if (e.shiftKey) store.toggleSel(id);
+      else if (!store.sel.includes(id)) store.setSel([id]);
+      renderSelection();
+      renderInspector();
+      if (!e.shiftKey) startMove(e);
+      return;
+    }
+    if (store.editingId) commitEditing();
     store.setSel([]);
     renderSelection();
     renderInspector();
+    startMarquee(e);
   });
+  slideHostEl.addEventListener('dblclick', onCanvasDblClick);
   const canvasArea = h('div', { class: 'canvas-area' }, [scroll]);
 
   // Properties panel (edit mode only)
@@ -303,8 +318,14 @@ async function serializeDoc(): Promise<Uint8Array> {
  * Push the current document to the host so it can save. Called after every edit (debounced) and
  * before anything that needs the up-to-date bytes (presenting, leaving edit mode).
  */
+let syncQueued = false;
 async function syncBytes(dirty: boolean): Promise<void> {
-  if (state.syncing) return;
+  if (state.syncing) {
+    // Queue one follow-up pass instead of dropping it: edits made while a serialization is in
+    // flight would otherwise never reach the host, and would silently be missing from the save.
+    syncQueued = true;
+    return;
+  }
   state.syncing = true;
   try {
     if (!dirty) {
@@ -319,9 +340,21 @@ async function syncBytes(dirty: boolean): Promise<void> {
     post({ type: 'error', message: 'Cannot serialize this document: ' + (e?.message || String(e)) });
   } finally {
     state.syncing = false;
+    if (syncQueued) {
+      syncQueued = false;
+      void syncBytes(dirty);
+    }
   }
 }
 const syncSoon = debounce(() => syncBytes(store.canUndo()), 350);
+
+/** Flush the latest edits to the host, then ask it to write the file. */
+async function flushAndSave() {
+  if (state.mode !== 'edit') return;
+  if (store.editingId) commitEditing();
+  await syncBytes(store.canUndo());
+  post({ type: 'save' });
+}
 
 /** Run a store action and refresh everything that depends on the model. */
 function runAction(fn: () => void, opts: { skipSync?: boolean } = {}) {
@@ -571,9 +604,9 @@ function onRectPointerDown(e: PointerEvent, el: any) {
 
   const apply = (patch: any) => {
     store.update((doc: any) => {
-      const target = store.findElement(el.id);
-      if (!target) return;
-      Object.assign(target, patch);
+      const t = findInDoc(doc, el.id);
+      if (!t) return;
+      Object.assign(t, patch);
     }, { history: false });
     const target: any = store.findElement(el.id);
     if (!target) return;
@@ -584,6 +617,15 @@ function onRectPointerDown(e: PointerEvent, el: any) {
     box.style.width = r.width + m.left + m.right + 'px';
     box.style.height = r.height + m.top + m.bottom + 'px';
     box.style.transform = target.rotation ? `rotate(${target.rotation}deg)` : '';
+    // Keep the rendered element itself in step with the frame, otherwise only the box moves
+    const node = slideHostEl.querySelector(`.el[data-id="${el.id}"]`) as HTMLElement | null;
+    if (node) {
+      node.style.left = `${r.x}px`;
+      node.style.top = `${r.y}px`;
+      node.style.width = `${r.width}px`;
+      node.style.height = `${r.height}px`;
+      node.style.transform = target.rotation ? `rotate(${target.rotation}deg)` : '';
+    }
   };
 
   const onMove = (ev: PointerEvent) => {
@@ -643,6 +685,350 @@ function onRectPointerDown(e: PointerEvent, el: any) {
   };
   box.addEventListener('pointermove', onMove);
   box.addEventListener('pointerup', onUp);
+}
+
+// ---------- Canvas interaction: selection, marquee, smart guides, rich text ----------
+/** Locate an element across the whole doc (top level or inside a group). */
+function findInDoc(doc: any, id: string): any {
+  for (const slide of doc.slides || []) {
+    for (const el of slide.elements || []) {
+      if (el.id === id) return el;
+      for (const c of el.children || []) if (c.id === id) return c;
+    }
+  }
+  return null;
+}
+
+/** Union bounding box of the given ids, in slide coordinates. */
+function selUnion(ids: string[]) {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const id of ids) {
+    const el = store.findElement(id);
+    if (!el) continue;
+    const r = elementRect(el);
+    x0 = Math.min(x0, r.x);
+    y0 = Math.min(y0, r.y);
+    x1 = Math.max(x1, r.x + r.width);
+    y1 = Math.max(y1, r.y + r.height);
+  }
+  return Number.isFinite(x0) ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0 } : null;
+}
+
+/** Move the rendered nodes with the model during a drag, instead of rebuilding the slide. */
+function syncElementNodes(ids: string[]) {
+  for (const id of ids) {
+    const el = store.findElement(id);
+    const node = slideHostEl.querySelector(`.el[data-id="${id}"]`) as HTMLElement | null;
+    if (!el || !node) continue;
+    const r = elementRect(el);
+    node.style.left = `${r.x}px`;
+    node.style.top = `${r.y}px`;
+    node.style.width = `${r.width}px`;
+    node.style.height = `${r.height}px`;
+    node.style.transform = el.rotation ? `rotate(${el.rotation}deg)` : '';
+  }
+  buildOverlay();
+}
+
+/** Update only the selection highlight, leaving the canvas DOM untouched. */
+function syncSelClasses() {
+  slideHostEl.querySelectorAll('.el[data-id]').forEach((node) => {
+    node.classList.toggle('is-sel', store.sel.includes((node as HTMLElement).dataset.id!));
+  });
+}
+
+/**
+ * Smart guides: snap the moving box to the edges/centres of sibling elements and of the slide.
+ * Returns the correction to add to the pointer delta, plus the guide lines to draw.
+ */
+function snapBox(box: any, others: any[]) {
+  const tol = 6 / (state.zoom || 1);
+  const size = store.doc.slideSize || { width: 1280, height: 720 };
+  const tx = [box.x, box.x + box.width / 2, box.x + box.width];
+  const ty = [box.y, box.y + box.height / 2, box.y + box.height];
+  const candX = [0, size.width / 2, size.width];
+  const candY = [0, size.height / 2, size.height];
+  for (const o of others) {
+    candX.push(o.x, o.x + o.width / 2, o.x + o.width);
+    candY.push(o.y, o.y + o.height / 2, o.y + o.height);
+  }
+  let bestX: any = null;
+  let bestY: any = null;
+  for (const t of tx)
+    for (const c of candX) {
+      const d = c - t;
+      if (Math.abs(d) <= tol && (!bestX || Math.abs(d) < Math.abs(bestX.d))) bestX = { d, pos: c };
+    }
+  for (const t of ty)
+    for (const c of candY) {
+      const d = c - t;
+      if (Math.abs(d) <= tol && (!bestY || Math.abs(d) < Math.abs(bestY.d))) bestY = { d, pos: c };
+    }
+  const guides: any[] = [];
+  if (bestX) guides.push({ type: 'v', pos: bestX.pos });
+  if (bestY) guides.push({ type: 'h', pos: bestY.pos });
+  return { dx: bestX ? bestX.d : 0, dy: bestY ? bestY.d : 0, guides };
+}
+
+function showGuides(guides: any[]) {
+  clearGuides();
+  for (const g of guides) {
+    overlayEl.append(
+      h('div', { class: `guide ${g.type}`, style: g.type === 'v' ? `left:${g.pos}px` : `top:${g.pos}px` })
+    );
+  }
+}
+function clearGuides() {
+  overlayEl.querySelectorAll('.guide').forEach((n) => n.remove());
+}
+
+/** Drag every selected element together. One undo entry per gesture. */
+function startMove(e: PointerEvent) {
+  const ids = store.sel.filter((id: string) => {
+    const el = store.findElement(id);
+    return el && !el.locked;
+  });
+  if (!ids.length) return;
+  e.preventDefault();
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const orig = ids.map((id) => {
+    const el = store.findElement(id);
+    return {
+      id,
+      x: num(el.x),
+      y: num(el.y),
+      kids: (el.children || []).map((c: any) => ({ id: c.id, x: num(c.x), y: num(c.y) }))
+    };
+  });
+  const box0 = selUnion(ids);
+  if (!box0) return;
+  const others = (store.slide?.elements || [])
+    .filter((n: any) => n && !ids.includes(n.id) && !n.hidden)
+    .map((n: any) => elementRect(n));
+  store.snapshot();
+  let moved = false;
+
+  const onMove = (ev: PointerEvent) => {
+    let dx = (ev.clientX - startX) / state.zoom;
+    let dy = (ev.clientY - startY) / state.zoom;
+    if (!moved && Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+    moved = true;
+    let guides: any[] = [];
+    if (store.snap !== false) {
+      const s = snapBox(
+        { x: box0.x + dx, y: box0.y + dy, width: box0.width, height: box0.height },
+        others
+      );
+      dx += s.dx;
+      dy += s.dy;
+      guides = s.guides;
+    }
+    store.update((doc: any) => {
+      for (const o of orig) {
+        const el = findInDoc(doc, o.id);
+        if (!el) continue;
+        el.x = Math.round(o.x + dx);
+        el.y = Math.round(o.y + dy);
+        for (const k of o.kids) {
+          const c = (el.children || []).find((x: any) => x.id === k.id);
+          if (c) {
+            c.x = Math.round(k.x + dx);
+            c.y = Math.round(k.y + dy);
+          }
+        }
+      }
+    }, { history: false });
+    syncElementNodes(ids);
+    showGuides(guides);
+  };
+  const onUp = () => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    clearGuides();
+    if (moved) {
+      state.version++;
+      renderAll();
+      syncSoon();
+    }
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+}
+
+/** Rubber-band selection over the canvas. */
+function startMarquee(e: PointerEvent) {
+  e.preventDefault();
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const box = h('div', { class: 'marquee' });
+  overlayEl.append(box);
+  const onMove = (ev: PointerEvent) => {
+    const x0 = Math.min(startX, ev.clientX);
+    const y0 = Math.min(startY, ev.clientY);
+    const x1 = Math.max(startX, ev.clientX);
+    const y1 = Math.max(startY, ev.clientY);
+    if (x1 - x0 < 3 && y1 - y0 < 3) return;
+    const r = slideHostEl.getBoundingClientRect();
+    box.style.left = `${(x0 - r.left) / state.zoom}px`;
+    box.style.top = `${(y0 - r.top) / state.zoom}px`;
+    box.style.width = `${(x1 - x0) / state.zoom}px`;
+    box.style.height = `${(y1 - y0) / state.zoom}px`;
+    const bx0 = (x0 - r.left) / state.zoom;
+    const by0 = (y0 - r.top) / state.zoom;
+    const bx1 = (x1 - r.left) / state.zoom;
+    const by1 = (y1 - r.top) / state.zoom;
+    const hit = (store.slide?.elements || [])
+      .filter((el: any) => el && !el.locked && !el.hidden)
+      .map((el: any) => ({ id: el.id, r: elementRect(el) }))
+      .filter((t: any) => t.r.x < bx1 && t.r.x + t.r.width > bx0 && t.r.y < by1 && t.r.y + t.r.height > by0)
+      .map((t: any) => t.id);
+    if (hit.length !== store.sel.length || hit.some((id: string) => !store.sel.includes(id))) {
+      store.setSel(hit);
+      syncSelClasses();
+    }
+  };
+  const onUp = () => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    box.remove();
+    renderSelection();
+    renderInspector();
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+}
+
+// ---------- Inline rich-text editing ----------
+function richBodyNode(id: string): HTMLElement | null {
+  return slideHostEl.querySelector(`.el[data-id="${id}"] [contenteditable="true"]`) as HTMLElement | null;
+}
+
+/** Double click: enter rich-text editing, or hand over to the type's own affordance. */
+function onCanvasDblClick(e: MouseEvent) {
+  if (state.mode !== 'edit') return;
+  const node = (e.target as HTMLElement).closest('.el[data-id]') as HTMLElement | null;
+  if (!node) return;
+  const el = store.findElement(node.dataset.id!);
+  if (!el || el.locked) return;
+  store.setSel([el.id]);
+  renderSelection();
+  renderInspector();
+  if (el.type === 'text') enterTextEditing(el);
+  else if (el.type === 'image') pickImage();
+  else toast(`Double-click editing is not supported for ${el.type} yet`);
+}
+
+/** Turn one text element into a contenteditable body and keep it focused. */
+function enterTextEditing(el: any) {
+  if (store.editingId === el.id) return;
+  store.editingId = el.id;
+  state.editingText = true;
+  renderAll();
+  const body = richBodyNode(el.id);
+  if (!body) return;
+  body.focus();
+  const range = document.createRange();
+  range.selectNodeContents(body);
+  range.collapse(false);
+  const sel = window.getSelection();
+  sel?.removeAllRanges();
+  sel?.addRange(range);
+  let timer: any = null;
+  body.addEventListener('keydown', (ev: KeyboardEvent) => {
+    ev.stopPropagation(); // keep the global shortcut bus out of the rich-text session
+    if (ev.key === 'Escape') {
+      ev.preventDefault();
+      (ev.target as HTMLElement).blur();
+    }
+  });
+  body.addEventListener('blur', () => {
+    clearTimeout(timer);
+    commitEditing();
+  });
+  body.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => commitEditing(true), 250);
+  });
+}
+
+/** Write the contenteditable content back into the model as paragraphs/runs. */
+function commitEditing(keepEditing = false) {
+  const id = store.editingId;
+  const el = id ? store.findElement(id) : null;
+  const body = id ? richBodyNode(id) : null;
+  if (!id || !el || !body) {
+    store.editingId = null;
+    state.editingText = false;
+    return;
+  }
+  const paras = parseRichBody(body, el);
+  const prev = Array.isArray(el.paragraphs) ? el.paragraphs : [];
+  store.update((doc: any) => {
+    const t = findInDoc(doc, id);
+    if (!t) return;
+    t.paragraphs = paras.map((p: any, i: number) => ({
+      runs: p.runs,
+      align: (prev[i] && prev[i].align) || el.align || 'left',
+      bullet: (prev[i] && prev[i].bullet) || undefined,
+      lineSpacing: (prev[i] && prev[i].lineSpacing) || el.lineSpacing || 1.15
+    }));
+  }, { coalesce: 'text:' + id });
+  if (!keepEditing) {
+    store.editingId = null;
+    state.editingText = false;
+    renderAll();
+    syncSoon();
+  }
+}
+
+/** contenteditable DOM -> model paragraphs/runs. Computed px styles are converted back to pt. */
+function parseRichBody(body: HTMLElement, el: any) {
+  const blocks = Array.from(body.querySelectorAll('div, p')) as HTMLElement[];
+  const roots = blocks.length ? blocks : [body];
+  const out: any[] = [];
+  for (const block of roots) {
+    const runs: any[] = [];
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    let n: Node | null;
+    while ((n = walker.nextNode())) {
+      const text = n.nodeValue ?? '';
+      if (!text) continue;
+      const parent = (n.parentElement as HTMLElement) || block;
+      // Bullet markers are decoration rendered by the view, not part of the text
+      if (parent.classList?.contains('bullet-mark') || parent.classList?.contains('bullet-image')) continue;
+      const cs = getComputedStyle(parent);
+      const run: any = { text };
+      if (/^(bold|bolder)$/i.test(cs.fontWeight) || parseInt(cs.fontWeight, 10) >= 600) run.bold = true;
+      if (cs.fontStyle === 'italic' || cs.fontStyle === 'oblique') run.italic = true;
+      if (cs.textDecorationLine.includes('underline') || cs.textDecoration.includes('underline')) run.underline = true;
+      const size = parseFloat(cs.fontSize);
+      if (Number.isFinite(size)) run.fontSize = Math.round((size * 72) / 96);
+      if (cs.color) run.color = rgbToHex(cs.color);
+      const ff = cs.fontFamily.split(',')[0].replace(/["']/g, '').trim();
+      if (ff) run.fontFace = ff;
+      const last = runs[runs.length - 1];
+      if (last && sameRunStyle(last, run)) last.text += run.text;
+      else runs.push(run);
+    }
+    out.push({ runs: runs.length ? runs : [{ text: '' }] });
+  }
+  return out;
+}
+
+function sameRunStyle(a: any, b: any) {
+  const keys = ['bold', 'italic', 'underline', 'fontSize', 'color', 'fontFace'];
+  return keys.every((k) => (a[k] ?? undefined) === (b[k] ?? undefined));
+}
+
+function rgbToHex(css: string): string {
+  const m = css.match(/rgba?\(([^)]+)\)/);
+  if (!m) return css;
+  const parts = m[1].split(',').map((v) => parseInt(v, 10));
+  return '#' + parts.slice(0, 3).map((v) => clamp(v, 0, 255).toString(16).padStart(2, '0')).join('');
 }
 
 // ---------- Inspector ----------
@@ -792,7 +1178,7 @@ function renderElementInspector(el: any) {
     inspectorEl.append(numField('Font Size', el.fontSize, (v) => update({ fontSize: v })));
     inspectorEl.append(selectField('Align', ['left', 'center', 'right', 'justify'], el.align || 'left', (v) => update({ align: v })));
     inspectorEl.append(selectField('Vertical', ['top', 'middle', 'bottom'], el.valign || 'top', (v) => update({ valign: v })));
-    inspectorEl.append(checkField('Bold', !!el.bold, (v) => actions.applyTextStyleSel({ bold: v }) && runAction(() => {})));
+    inspectorEl.append(checkField('Bold', !!el.bold, (v) => runAction(() => actions.applyTextStyleSel({ bold: v }))));
     inspectorEl.append(checkField('Italic', !!el.italic, (v) => runAction(() => actions.applyTextStyleSel({ italic: v }))));
     inspectorEl.append(checkField('Underline', !!el.underline, (v) => runAction(() => actions.applyTextStyleSel({ underline: v }))));
   } else if (el.type === 'shape') {
@@ -1108,6 +1494,62 @@ function onKeyDown(e: KeyboardEvent) {
     e.preventDefault();
     actions.selectAll();
     renderAll();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'c') {
+    e.preventDefault();
+    actions.copySelected(false);
+    renderAll();
+    syncSoon();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'x') {
+    e.preventDefault();
+    actions.copySelected(true);
+    renderAll();
+    syncSoon();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'v') {
+    e.preventDefault();
+    actions.paste();
+    renderAll();
+    syncSoon();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'd') {
+    e.preventDefault();
+    runAction(() => actions.duplicateSelected());
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'g') {
+    e.preventDefault();
+    runAction(() => (e.shiftKey ? actions.ungroupSelection() : actions.groupSelection()));
+    return;
+  }
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    e.preventDefault();
+    runAction(() => actions.deleteSelected());
+    return;
+  }
+  if (e.key === 'Enter') {
+    const one = store.sel.length === 1 ? store.findElement(store.sel[0]) : null;
+    if (one && one.type === 'text') {
+      e.preventDefault();
+      enterTextEditing(one);
+    }
+    return;
+  }
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    // Cycle through the elements of the current slide
+    const els = (store.slide?.elements || []).filter((n: any) => n && !n.hidden);
+    if (!els.length) return;
+    const cur = store.sel.length ? els.findIndex((n: any) => n.id === store.sel[0]) : -1;
+    const next = e.shiftKey ? (cur <= 0 ? els.length - 1 : cur - 1) : (cur + 1) % els.length;
+    store.setSel([els[next].id]);
+    renderSelection();
+    renderInspector();
     return;
   }
   const nudges: Record<string, [number, number]> = {

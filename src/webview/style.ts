@@ -176,6 +176,11 @@ body {
 .guide { position: absolute; background: #ea4335; pointer-events: none; }
 .guide.h { height: 1px; left: 0; right: 0; }
 .guide.v { width: 1px; top: 0; bottom: 0; }
+/* Rubber-band selection box */
+.marquee {
+  position: absolute; border: 1px dashed var(--accent-2);
+  background: rgba(66,133,244,.12); pointer-events: none;
+}
 
 /* Right-side properties panel */
 .inspector { width: 280px; background: var(--panel); border-left: 1px solid var(--border); overflow-y: auto; padding: 10px; flex: 0 0 auto; }
