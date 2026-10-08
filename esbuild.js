@@ -9,6 +9,26 @@
 // 并选择 "Run Extension (watch)" 启动项（它会自动先跑本 watch 任务）。
 const esbuild = require('esbuild');
 const path = require('path');
+const fs = require('fs');
+
+/**
+ * Resolve an entry file inside @fefeding/ppt-parser.
+ * Prefer a sibling `pptx-parser` repo (local dev / live-editing the parser), and fall back to the
+ * published npm package in node_modules (used on CI or when no sibling repo is present). The npm
+ * package already ships `dist/ppt-parser.browser.js` and `examples/chart-lib/chart-renderer.js`.
+ */
+function resolveParserEntry(rel) {
+  const local = path.resolve(__dirname, '..', 'pptx-parser', rel);
+  if (fs.existsSync(local)) return local;
+  const fromNodeModules = path.resolve(__dirname, 'node_modules', '@fefeding', 'ppt-parser', rel);
+  if (!fs.existsSync(fromNodeModules)) {
+    throw new Error(
+      `Cannot resolve @fefeding/ppt-parser entry "${rel}". ` +
+      `Run "npm install" or place a sibling "pptx-parser" repo so the file is available.`
+    );
+  }
+  return fromNodeModules;
+}
 
 const watch = process.argv.includes('--watch');
 const production = process.argv.includes('--production');
@@ -39,11 +59,11 @@ async function buildWithContext() {
     format: 'iife',
     platform: 'browser',
     target: 'es2020',
-    // 强制使用解析器自带的浏览器构建（已内联 jszip/tinycolor2，且不依赖 Node 的 fs）
+    // 优先用同级 pptx-parser 仓库的本地构建（开发期联调），CI/无本地仓库时回退到 node_modules 中
+    // 已发布的 npm 包（@fefeding/ppt-parser 自带 dist 浏览器构建与 chart-renderer）。
     alias: {
-      '@fefeding/ppt-parser': path.resolve(__dirname, '..', 'pptx-parser', 'dist', 'ppt-parser.browser.js'),
-      // 图表渲染器由解析器包直接提供，避免在本仓库内再维护一份副本
-      '@fefeding/ppt-parser/chart-renderer': path.resolve(__dirname, '..', 'pptx-parser', 'examples', 'chart-lib', 'chart-renderer.js')
+      '@fefeding/ppt-parser': resolveParserEntry('dist/ppt-parser.browser.js'),
+      '@fefeding/ppt-parser/chart-renderer': resolveParserEntry('examples/chart-lib/chart-renderer.js')
     }
   });
 
