@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@fefeding/ppt-parser':
-        specifier: file:../pptx-parser
-        version: file:../pptx-parser
+        specifier: ^1.0.19
+        version: 1.0.19
       jszip:
         specifier: ^3.10.2
         version: 3.10.2
@@ -22,10 +22,10 @@ importers:
         specifier: ^20.19.43
         version: 20.19.43
       '@types/vscode':
-        specifier: ^1.85.0
+        specifier: ^1.140.0
         version: 1.140.0
       esbuild:
-        specifier: ^0.23.0
+        specifier: ^0.23.1
         version: 0.23.1
       typescript:
         specifier: ^5.9.3
@@ -177,12 +177,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@fefeding/ppt-parser@1.0.15':
-    resolution: {integrity: sha512-m8CThZL4neyksnd15wugRoZwhmrAEA91iA4RN6DTMa4DWQKsdDzikAk4sucjEOH7/HY0WhclkY0kqQV6I+Ibjw==}
-    engines: {node: '>=16.0.0', npm: '>=8.0.0'}
-
-  '@fefeding/ppt-parser@file:../pptx-parser':
-    resolution: {directory: ../pptx-parser, type: directory}
+  '@fefeding/ppt-parser@1.0.19':
+    resolution: {integrity: sha512-BlPK4BplcOXAMF45NsG7xG7ifwztOk0hiMIrwajjAhihwCDH3XmtcKMiATvHJDojFlkOMgLDhFAAg38HXLrVaQ==}
     engines: {node: '>=16.0.0', npm: '>=8.0.0'}
 
   '@types/node@20.19.43':
@@ -320,14 +316,8 @@ snapshots:
   '@esbuild/win32-x64@0.23.1':
     optional: true
 
-  '@fefeding/ppt-parser@1.0.15':
+  '@fefeding/ppt-parser@1.0.19':
     dependencies:
-      jszip: 3.10.2
-      tinycolor2: 1.6.0
-
-  '@fefeding/ppt-parser@file:../pptx-parser':
-    dependencies:
-      '@fefeding/ppt-parser': 1.0.15
       jszip: 3.10.2
       tinycolor2: 1.6.0
 

@@ -86,8 +86,73 @@ body {
 .overlay { position: absolute; top: 0; left: 0; pointer-events: none; }
 .grid-overlay { position: absolute; inset: 0; pointer-events: none; display: none; }
 .grid-overlay.on { display: block; background-image: linear-gradient(rgba(0,0,0,.08) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,.08) 1px, transparent 1px); background-size: 40px 40px; }
+
+/* ===== Rendered slide elements =====
+   Ported from the parser's editor renderer (examples/editor/styles.css) so elements
+   built by render.ts get the same box model / text metrics as the reference editor. */
+.slide-frame { position: absolute; top: 0; left: 0; }
+.slide-frame.show-grid {
+  background-image: linear-gradient(to right, rgba(0,0,0,.06) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(0,0,0,.06) 1px, transparent 1px);
+}
+.el { position: absolute; box-sizing: border-box; }
+.el.locked { cursor: default; }
+.el.hidden-el { display: none; }
+.el-image img { width: 100%; height: 100%; display: block; }
+.el-media video { pointer-events: none; }
+.el.is-sel .el-media video { pointer-events: auto; }
+.el-media .media-badge { display: flex; align-items: center; justify-content: center; }
+.el.is-sel .el-media .media-badge { display: none; }
+.el-text .tb-body {
+  width: 100%; height: 100%; display: flex; flex-direction: column;
+  justify-content: flex-start; outline: none; word-break: break-word;
+  position: relative; z-index: 1;
+  /* a:bodyPr lIns/tIns are inner padding and must sit inside the element box, otherwise a
+     short text frame (e.g. 23.6px tall) loses its content area and the text drifts down. */
+  box-sizing: border-box;
+}
+.el-text .tb-body > div { min-height: 1em; flex-shrink: 0; }
+/* Hanging indent via negative first-line indent, so wrapped lines align with the bullet text */
+.el-text .tb-body > div.bullet-para { padding-left: 1.3em; text-indent: -1.3em; }
+.el-text .tb-body > div.num-para { padding-left: 1.8em; text-indent: -1.8em; }
+.el-text .tb-body > div .bullet-mark {
+  display: inline-block; min-width: 1.2em; text-align: left;
+  white-space: pre; margin-right: 0.2em;
+}
+.el-text .tb-body > div .bullet-img img { display: inline-block; max-width: none; object-fit: contain; }
+.el-table { display: grid; }
+.el-table .cell {
+  border: 1px solid #cbd5e1; padding: 4px 6px; overflow: hidden; display: flex;
+  align-items: flex-start; word-break: break-word; white-space: pre-wrap;
+}
+.el-table .cell.cell-top { align-items: flex-start; }
+.el-table .cell.cell-middle { align-items: center; }
+.el-table .cell.cell-bottom { align-items: flex-end; }
+.el-chart svg { display: block; width: 100%; height: 100%; }
+.el-raw {
+  border: 1px dashed #9aa0a6; background: repeating-linear-gradient(45deg,#f8f9fa,#f8f9fa 8px,#eceff1 8px,#eceff1 16px);
+  display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px;
+  text-align: center; padding: 6px;
+}
+/* Group edit state: dim other top-level elements and outline the active group */
+.frame.group-editing .el.dimmed { opacity: 0.2; }
+.frame.group-editing .el-group.group-edit-active { outline: 2px dashed var(--accent-2); outline-offset: -2px; }
+.el[data-editing="1"] .tb-body { outline: 2px solid var(--accent-2); }
+
+/* Comment cards drawn on the canvas (matches the preview side's .pptx-comment styling) */
+.slide-comment {
+  position: absolute; width: 200px; box-sizing: border-box; z-index: 60;
+  background: #fff7cc; border: 1px solid #f1d27a; border-radius: 8px;
+  padding: 8px 10px; box-shadow: 0 2px 6px rgba(0,0,0,.15);
+  font: 12px/1.4 sans-serif; color: #3b2f00; pointer-events: none;
+}
+.slide-comment .sc-author { font-weight: 700; margin-bottom: 2px; }
+.slide-comment .sc-text { white-space: pre-wrap; }
+.slide-comment .sc-date { margin-top: 4px; font-size: 10px; color: #8a7a3a; }
+
 .sel-rect { position: absolute; border: 1px solid var(--accent); background: rgba(249,171,0,.08); pointer-events: auto; cursor: move; }
 .sel-rect.selected { border-color: var(--accent-2); background: rgba(66,133,244,.1); }
+.sel-rect.locked { border-style: dashed; cursor: default; }
 .handle { position: absolute; width: 8px; height: 8px; background: #fff; border: 1px solid var(--accent-2); border-radius: 1px; }
 .handle.nw { left: -4px; top: -4px; cursor: nwse-resize; }
 .handle.n  { left: 50%; top: -4px; margin-left: -4px; cursor: ns-resize; }
@@ -97,6 +162,20 @@ body {
 .handle.s  { left: 50%; bottom: -4px; margin-left: -4px; cursor: ns-resize; }
 .handle.sw { left: -4px; bottom: -4px; cursor: nesw-resize; }
 .handle.w  { left: -4px; top: 50%; margin-top: -4px; cursor: ew-resize; }
+/* Rotation grip, positioned by JS above the top edge */
+.handle.rot {
+  left: 50%; margin-left: -5px; cursor: grab;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--accent-2); border-color: #fff;
+}
+.lock-badge {
+  position: absolute; top: -9px; left: -9px; font-size: 11px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 0 3px;
+}
+/* Snap guides while dragging */
+.guide { position: absolute; background: #ea4335; pointer-events: none; }
+.guide.h { height: 1px; left: 0; right: 0; }
+.guide.v { width: 1px; top: 0; bottom: 0; }
 
 /* Right-side properties panel */
 .inspector { width: 280px; background: var(--panel); border-left: 1px solid var(--border); overflow-y: auto; padding: 10px; flex: 0 0 auto; }

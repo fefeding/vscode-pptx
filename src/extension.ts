@@ -57,23 +57,14 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     });
 
     const send = (msg: HostToWebview) => webviewPanel.webview.postMessage(msg);
-    const pushUpdate = async (error?: string) => {
-      const snap = await document.snapshot();
-      send({ type: 'update', mode: snap.mode, originalBytes: snap.originalBytes, bytes: snap.bytes, model: snap.model, canUndo: snap.canUndo, canRedo: snap.canRedo, error });
-    };
-
     const sendInit = async () => {
-      const s = await document.snapshot();
+      const s = document.snapshot();
       send({
         type: 'init',
-        slideSize: document.slideSize,
         mode: s.mode,
         originalBytes: s.originalBytes,
         bytes: s.bytes,
-        model: s.model,
-        title: document.uri.path.split('/').pop() || 'presentation.pptx',
-        canUndo: s.canUndo,
-        canRedo: s.canRedo
+        title: document.uri.path.split('/').pop() || 'presentation.pptx'
       });
     };
 
@@ -86,19 +77,10 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
             break;
           case 'setMode':
             document.mode = message.mode;
-            await pushUpdate();
             break;
-          case 'op': {
-            const res = await document.applyOp(message.op);
-            if (res.ok) await pushUpdate();
-            else send({ type: 'info', kind: 'error', message: res.error || 'Operation failed' });
-            break;
-          }
-          case 'undo':
-            if (await document.undo()) await pushUpdate();
-            break;
-          case 'redo':
-            if (await document.redo()) await pushUpdate();
+          case 'sync':
+            document.setBytes(message.bytes);
+            document.setDirty(message.dirty);
             break;
           case 'save':
             await document.save();
@@ -106,12 +88,15 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
             send({ type: 'info', kind: 'info', message: 'Saved' });
             break;
           case 'saveAs':
-            await this.saveAs(document);
+            await this.saveAs(document, message.bytes);
             break;
           case 'revert':
             await document.revert();
-            await pushUpdate();
+            await sendInit();
             send({ type: 'info', kind: 'info', message: 'Reloaded' });
+            break;
+          case 'error':
+            send({ type: 'info', kind: 'error', message: message.message });
             break;
         }
       } catch (err: any) {
@@ -158,13 +143,16 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     };
   }
 
-  private async saveAs(document: PptxCustomDocument): Promise<void> {
+  private async saveAs(document: PptxCustomDocument, bytes?: string | null): Promise<void> {
     const uri = await vscode.window.showSaveDialog({
       defaultUri: document.uri,
       saveLabel: 'Export Copy',
       filters: { 'PowerPoint': ['pptx'] }
     });
     if (!uri) return;
+    // Adopt the webview's latest bytes when provided, then export (saving to another
+    // targetUri intentionally leaves the dirty flag untouched)
+    if (bytes) document.setBytes(bytes);
     await document.save(uri);
     vscode.window.showInformationMessage(`Exported copy: ${uri.fsPath}`);
   }

@@ -58,17 +58,18 @@
     "vscode:prepublish": "node esbuild.js --production",
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
+    "dev": "node esbuild.js --watch",
     "install:parser": "npm install file:../pptx-parser"
   },
   "dependencies": {
-    "@fefeding/ppt-parser": "^1.0.17",
+    "@fefeding/ppt-parser": "^1.0.19",
     "jszip": "^3.10.2",
     "tinycolor2": "^1.6.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
-    "@types/vscode": "^1.85.0",
-    "esbuild": "^0.23.0",
+    "@types/vscode": "^1.140.0",
+    "esbuild": "^0.23.1",
     "typescript": "^5.9.3"
   }
 }

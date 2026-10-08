@@ -1,10 +1,36 @@
 // PPTX editor webview main logic.
-// Default "preview mode": renders original file bytes faithfully via pptxToHtml (same as examples/index.html).
-// "Edit mode": switches to standard model round-trip rendering with a selectable/draggable/editable overlay.
+//
+// Preview mode: renders the original file bytes with pptxToHtml (identical to the parser's
+// preview page) — always the most faithful view, also used for presenting.
+// Edit mode: parses the bytes into the parser's editor document (pptxToStandard -> docFromPptx)
+// and renders straight from that model (no PPTX byte round-trip, so nothing is lost in
+// serialization). All edits go through the parser's editor core (createStore / createActions),
+// which owns the model, selection and undo/redo history.
+//
+// The extension host only stores PPTX bytes: after each edit the webview serializes the
+// document and syncs the result, so the host can save without understanding the model.
 import { CSS } from './style';
-import { pptxToHtml } from '@fefeding/ppt-parser';
+import { h, clamp } from './util';
+import {
+  pptxToHtml,
+  pptxToStandard,
+  jsonToPptx,
+  docFromPptx,
+  docToPptx,
+  createStore,
+  createActions,
+  elementRect,
+  effectMargin
+} from '@fefeding/ppt-parser';
+import {
+  renderSlideInto,
+  renderThumbInto,
+  disposeDetachedCharts,
+  disposeAllCharts
+} from './render';
+// Same ECharts renderer the preview side uses (option building incl. 3D matches examples/index.html)
 import { chartRenderer } from '@fefeding/ppt-parser/chart-renderer';
-import type { HostToWebview, WebviewToHost } from '../protocol';
+import type { EditorMode, HostToWebview, WebviewToHost } from '../protocol';
 
 declare function acquireVsCodeApi(): {
   postMessage(msg: WebviewToHost): void;
@@ -13,49 +39,48 @@ declare function acquireVsCodeApi(): {
 };
 const vscode = acquireVsCodeApi();
 
-// ---------- Global state ----------
+const PARSE_OPTS = { mediaProcess: true, themeProcess: true } as const;
+
+// ---------- Document state ----------
+// One editor store per webview (the parser core keeps the document, selection and history).
+const store: any = createStore();
+const actions: any = createActions(store);
+
 const state: {
+  mode: EditorMode;
+  title: string;
+  /** Original file bytes — preview renders these. */
+  original: Uint8Array | null;
+  /** Latest bytes: original until the webview reports an edit. */
+  latest: Uint8Array | null;
+  /** Preview render result (pptxToHtml output). */
+  preview: { slides: string[]; charts: any[]; metadata?: any; customProps?: Record<string, string> } | null;
+  present: { slides: string[]; charts: any[]; version: number } | null;
+  /** Bumped whenever the serialized document changes, to invalidate cached renders. */
+  version: number;
   slideSize: { width: number; height: number };
-  slidesHtml: string[]; // currently displayed HTML (preview or edit, filled after on-demand rendering)
-  model: any;
   current: number;
-  selected: { slide: number; element: number } | null;
   zoom: number;
   userZoom: number | null;
-  editingText: boolean;
   grid: boolean;
-  title: string;
-  mode: 'preview' | 'edit';
-  modelCanUndo: boolean;
-  modelCanRedo: boolean;
+  editingText: boolean;
+  syncing: boolean;
 } = {
+  mode: 'preview',
+  title: 'presentation.pptx',
+  original: null,
+  latest: null,
+  preview: null,
+  present: null,
+  version: 0,
   slideSize: { width: 1280, height: 720 },
-  slidesHtml: [],
-  model: null,
   current: 0,
-  selected: null,
   zoom: 1,
   userZoom: null,
-  editingText: false,
   grid: false,
-  title: 'presentation.pptx',
-  mode: 'preview',
-  modelCanUndo: false,
-  modelCanRedo: false
+  editingText: false,
+  syncing: false
 };
-
-// Render sources (bytes from host) and render cache: on-demand rendering to avoid forcing preview to wait for model round-trip
-let previewSrc: any = null; // original file bytes — faithful preview
-let editSrc: any = null; // model round-tripped bytes — edit mode
-
-/** A render result: per-slide HTML + chart data + document info (charts need a second pass by echarts). */
-interface RenderResult {
-  slides: string[];
-  charts: any[];
-  metadata?: any;
-  customProps?: Record<string, string>;
-}
-const rendered: { preview?: RenderResult; edit?: RenderResult } = {};
 
 // ---------- DOM references ----------
 let root!: HTMLElement;
@@ -72,36 +97,16 @@ let zoomLabelEl!: HTMLElement;
 let undoBtn!: HTMLButtonElement;
 let redoBtn!: HTMLButtonElement;
 let gridBtn!: HTMLElement;
-let modeBtn!: HTMLButtonElement;
+let modeBtn!: HTMLElement;
 let presentEl!: HTMLElement;
 let presentHostEl!: HTMLElement;
 let docInfoEl!: HTMLElement;
 let toastEl!: HTMLElement;
 
-// ---------- Utility functions ----------
-function h<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, any> = {},
-  children: (Node | string)[] = []
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else if (k === 'style') node.setAttribute('style', v);
-    else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2).toLowerCase(), v);
-    else if (k === 'html') node.innerHTML = v;
-    else if (v != null) node.setAttribute(k, String(v));
-  }
-  for (const c of children) node.append(c);
-  return node;
-}
-
+// ---------- Utilities ----------
 function num(v: any, def = 0): number {
   const n = typeof v === 'number' ? v : parseFloat(v);
   return Number.isFinite(n) ? n : def;
-}
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, v));
 }
 function post(msg: WebviewToHost) {
   vscode.postMessage(msg);
@@ -120,25 +125,33 @@ function debounce(fn: (...a: any[]) => void, ms: number) {
     t = setTimeout(() => fn(...a), ms);
   };
 }
-
-// ---------- Layout ----------
-function injectStyle() {
-  const style = document.createElement('style');
-  style.textContent = CSS;
-  document.head.appendChild(style);
+function toBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function toBase64(bytes: Uint8Array): string {
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)) as any);
+  }
+  return btoa(bin);
 }
 
+// ---------- Layout ----------
 function buildLayout() {
   root = document.getElementById('app')!;
   root.className = 'app mode-preview';
 
-  // Slide panel toolbar (replaces the top bar)
-  const newBtn = h('button', { class: 'btn', title: 'New slide', onclick: () => sendOp({ kind: 'slideAdd', after: state.current }) }, ['+']);
+  // Slide panel toolbar
+  const newBtn = h('button', { class: 'btn', title: 'New slide', onclick: () => runAction(() => actions.addSlide()) }, ['+']);
   const presentBtn = h('button', { class: 'btn', title: 'Present (F5)', onclick: startPresent }, ['Present']);
   const docBtn = h('button', { class: 'btn', title: 'Document properties (metadata and custom properties)', onclick: toggleDocInfo }, ['Props']);
   modeBtn = h('button', { class: 'btn', title: 'Switch to edit mode', onclick: toggleMode }, ['Edit']);
-  undoBtn = h('button', { class: 'btn edit-only', title: 'Undo (Ctrl+Z)', onclick: () => post({ type: 'undo' }) }, ['Undo']);
-  redoBtn = h('button', { class: 'btn edit-only', title: 'Redo (Ctrl+Y)', onclick: () => post({ type: 'redo' }) }, ['Redo']);
+  undoBtn = h('button', { class: 'btn edit-only', title: 'Undo (Ctrl+Z)', onclick: () => runAction(() => store.undo()) }, ['Undo']);
+  redoBtn = h('button', { class: 'btn edit-only', title: 'Redo (Ctrl+Y)', onclick: () => runAction(() => store.redo()) }, ['Redo']);
   const toolbar = h('div', { class: 'sp-toolbar' }, [newBtn, presentBtn, docBtn, modeBtn, undoBtn, redoBtn]);
 
   // Slide list
@@ -146,19 +159,31 @@ function buildLayout() {
   const spHead = h('div', { class: 'sp-head' }, [h('span', {}, ['Slides'])]);
   const slidesPanel = h('div', { class: 'slides-panel' }, [spHead, toolbar, slideListEl]);
 
-  // Canvas
-  slideHostEl = h('div', { class: 'slide-host' });
+  // Canvas: frame + overlay share one scaled coordinate space
+  slideHostEl = h('div', { class: 'slide-host slide-frame' });
   overlayEl = h('div', { class: 'overlay' });
   gridEl = h('div', { class: 'grid-overlay' });
   stageInnerEl = h('div', { class: 'stage-inner' }, [slideHostEl, gridEl, overlayEl]);
   stageEl = h('div', { class: 'stage' }, [stageInnerEl]);
   const scroll = h('div', { class: 'canvas-scroll', id: 'canvasScroll' }, [stageEl]);
   // Ctrl/Cmd + wheel zooms the canvas (plain wheel still scrolls)
-  scroll.addEventListener('wheel', (e) => {
-    if (!(e.ctrlKey || e.metaKey)) return;
-    e.preventDefault();
-    setZoom(state.userZoom ?? state.zoom, true, e.deltaY < 0 ? 1.1 : 0.9);
-  }, { passive: false });
+  scroll.addEventListener(
+    'wheel',
+    (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      setZoom(state.userZoom ?? state.zoom, true, e.deltaY < 0 ? 1.1 : 0.9);
+    },
+    { passive: false }
+  );
+  // Click on empty canvas clears the selection
+  slideHostEl.addEventListener('pointerdown', (e) => {
+    if (state.mode !== 'edit') return;
+    if ((e.target as HTMLElement).closest('.el')) return;
+    store.setSel([]);
+    renderSelection();
+    renderInspector();
+  });
   const canvasArea = h('div', { class: 'canvas-area' }, [scroll]);
 
   // Properties panel (edit mode only)
@@ -176,7 +201,10 @@ function buildLayout() {
     statusCountEl,
     h('span', { class: 'spacer' }),
     gridBtn,
-    zoomOut, zoomFit, zoomLabelEl, zoomIn
+    zoomOut,
+    zoomFit,
+    zoomLabelEl,
+    zoomIn
   ]);
 
   // Presentation layer
@@ -184,59 +212,141 @@ function buildLayout() {
   presentEl = h('div', { class: 'present', onclick: presentNext }, [presentHostEl]);
 
   docInfoEl = h('div', { class: 'doc-info' });
-
   toastEl = h('div', { class: 'toast' });
 
   // Right-click context menu (on canvas)
   ctxMenuEl = h('div', { class: 'ctx-menu' });
-  canvasArea.addEventListener('contextmenu', (e) => { e.preventDefault(); showCtxMenu(e.clientX, e.clientY); });
+  canvasArea.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showCtxMenu(e.clientX, e.clientY);
+  });
   document.addEventListener('click', () => hideCtxMenu());
   window.addEventListener('scroll', () => hideCtxMenu(), true);
 
   root.append(main, statusbar, docInfoEl, presentEl, toastEl, ctxMenuEl);
+
+  document.addEventListener('keydown', onKeyDown);
+}
+
+// ---------- Preview pipeline (pptxToHtml: most faithful rendering) ----------
+/**
+ * Inject the parser's global stylesheet. pptxToHtml emits classed markup (_css_1 /
+ * _tbl_cell_css_3, …) whose layout comes entirely from `styles.global`; without it the slides
+ * render as unstyled HTML. Kept in its own <style> so the editor's own CSS stays separate.
+ */
+let globalStyleEl: HTMLStyleElement | null = null;
+function ensureGlobalStyles(css: string | undefined): void {
+  if (!css) return;
+  if (!globalStyleEl) {
+    globalStyleEl = document.createElement('style');
+    globalStyleEl.id = 'pptx-global-styles';
+    document.head.appendChild(globalStyleEl);
+  }
+  if (globalStyleEl.textContent !== css) globalStyleEl.textContent = css;
+}
+
+async function renderPreview(): Promise<void> {
+  const bytes = state.latest;
+  if (!bytes || !bytes.length) return;
+  const result = await pptxToHtml(bytes, PARSE_OPTS);
+  ensureGlobalStyles(result.styles?.global);
+  state.preview = {
+    slides: result.slides.map((s: any) => s.html),
+    charts: result.charts || [],
+    metadata: result.metadata,
+    customProps: result.customProps
+  };
+  state.slideSize = result.slideSize || state.slideSize;
+  if (state.present && state.present.version === state.version) state.present = null;
+  if (state.mode === 'preview') {
+    state.current = clamp(state.current, 0, state.preview.slides.length - 1);
+    renderAll();
+  }
+}
+
+// ---------- Edit pipeline (editor document -> DOM) ----------
+async function enterEditMode(): Promise<void> {
+  const bytes = state.latest;
+  if (!bytes || !bytes.length) return;
+  const standard = await pptxToStandard(bytes, PARSE_OPTS);
+  const doc = docFromPptx(standard, { fileName: state.title });
+  store.setDoc(doc, { noHistory: true });
+  store.setSlide(state.current);
+  state.slideSize = doc.slideSize || state.slideSize;
+  state.current = clamp(state.current, 0, store.slideCount - 1);
+  renderAll();
+  setZoom(null);
+}
+
+/** Serialize the edited document back to PPTX bytes. */
+async function serializeDoc(): Promise<Uint8Array> {
+  const out = await jsonToPptx(docToPptx(store.doc), { outputType: 'uint8array' });
+  return out as Uint8Array;
+}
+
+/**
+ * Push the current document to the host so it can save. Called after every edit (debounced) and
+ * before anything that needs the up-to-date bytes (presenting, leaving edit mode).
+ */
+async function syncBytes(dirty: boolean): Promise<void> {
+  if (state.syncing) return;
+  state.syncing = true;
+  try {
+    if (!dirty) {
+      // Undo landed back on the imported state: fall back to the original bytes
+      state.latest = state.original;
+      post({ type: 'sync', bytes: null, dirty: false });
+      return;
+    }
+    state.latest = await serializeDoc();
+    post({ type: 'sync', bytes: toBase64(state.latest), dirty: true });
+  } catch (e: any) {
+    post({ type: 'error', message: 'Cannot serialize this document: ' + (e?.message || String(e)) });
+  } finally {
+    state.syncing = false;
+  }
+}
+const syncSoon = debounce(() => syncBytes(store.canUndo()), 350);
+
+/** Run a store action and refresh everything that depends on the model. */
+function runAction(fn: () => void, opts: { skipSync?: boolean } = {}) {
+  if (state.mode !== 'edit') return;
+  try {
+    fn();
+  } catch (e: any) {
+    toast(e?.message || String(e), 'error');
+    return;
+  }
+  state.version++;
+  renderAll();
+  if (!opts.skipSync) syncSoon();
 }
 
 // ---------- Mode switching ----------
-function toggleMode() {
-  const next: 'preview' | 'edit' = state.mode === 'preview' ? 'edit' : 'preview';
+async function toggleMode() {
+  const next: EditorMode = state.mode === 'preview' ? 'edit' : 'preview';
   state.mode = next;
-  state.selected = null;
   post({ type: 'setMode', mode: next });
   applyMode();
 }
-function applyMode() {
-  root.className = 'app mode-' + state.mode;
-  modeBtn.textContent = state.mode === 'preview' ? 'Edit' : 'Preview';
-  modeBtn.title = state.mode === 'preview' ? 'Switch to edit mode' : 'Switch to preview mode';
 
-  const htmls = rendered[state.mode]?.slides;
-  if (htmls) {
-    state.slidesHtml = htmls;
-    state.current = clamp(state.current, 0, state.slidesHtml.length - 1);
-    renderAll();
+async function applyMode() {
+  root.className = 'app mode-' + state.mode;
+  const editing = state.mode === 'edit';
+  modeBtn.textContent = editing ? 'Preview' : 'Edit';
+  modeBtn.title = editing ? 'Switch to preview mode' : 'Switch to edit mode';
+  overlayEl.innerHTML = '';
+
+  if (editing) {
+    await enterEditMode();
     return;
   }
-  // Cache not ready: render empty state first, then refresh when rendering completes (non-blocking)
-  state.slidesHtml = [];
-  renderAll();
-  renderMode(state.mode);
-}
-
-/** Render the current mode; show toast on failure, never silently swallow errors. */
-async function renderMode(mode: 'preview' | 'edit') {
-  const src = mode === 'preview' ? previewSrc : editSrc;
-  if (!src) return;
+  // Leaving edit mode: flush the edited bytes first, then render them faithfully
+  if (store.canUndo()) await syncBytes(true);
+  disposeAllCharts();
   try {
-    // Skip silently when bytes for this mode aren't ready yet (e.g. preview mode: host doesn't do model round-trip)
-    if (!toBytes(src).length) return;
-    rendered[mode] = await renderFromBytes(src, mode === 'preview');
-    if (state.mode === mode) {
-      state.slidesHtml = rendered[mode]!.slides;
-      state.current = clamp(state.current, 0, state.slidesHtml.length - 1);
-      renderAll();
-    }
+    await renderPreview();
   } catch (e: any) {
-    console.error('[pptx-webview] Render failed:', e);
     toast('Render failed: ' + (e?.message || String(e)), 'error');
   }
 }
@@ -245,8 +355,8 @@ async function renderMode(mode: 'preview' | 'edit') {
 /** Fit the slide into the canvas area on both axes (capped at 2x). */
 function getFitZoom(): number {
   const sc = document.getElementById('canvasScroll');
-  const availW = (sc?.clientWidth || 800) - 40; // subtract left/right padding
-  const availH = (sc?.clientHeight || 600) - 40; // subtract top/bottom padding
+  const availW = (sc?.clientWidth || 800) - 40;
+  const availH = (sc?.clientHeight || 600) - 40;
   return clamp(Math.min(availW / state.slideSize.width, availH / state.slideSize.height), 0.1, 2);
 }
 function setZoom(value: number | null, isUser = true, factor?: number) {
@@ -272,9 +382,38 @@ function applyStageTransform() {
   stageEl.style.height = Math.round(state.slideSize.height * state.zoom) + 'px';
 }
 
-// ---------- Charts (echarts) ----------
-/** After containers are replaced, old echarts instances are detached from the document; dispose to avoid leaks. */
-function disposeDetachedCharts() {
+// ---------- Charts ----------
+/**
+ * Paint the ECharts placeholders emitted by pptxToHtml (preview + presentation). In edit mode
+ * charts are rendered from the model by render.ts instead.
+ */
+function paintCharts(host: HTMLElement, charts?: any[]) {
+  const list0 = charts ?? state.preview?.charts;
+  if (!list0 || !list0.length) return;
+  if (typeof (window as any).echarts === 'undefined') return; // skip silently if echarts not loaded
+  try {
+    // Container scope, so repeated copies of the same slide HTML (thumbnail / canvas / presentation)
+    // never resolve to each other's chart containers.
+    const list = list0.filter((c: any) => !!host.querySelector(`[id="${c.chartId}"]`));
+    if (list.length) chartRenderer.renderCharts(list, host);
+  } catch (e: any) {
+    console.warn('[pptx-webview] Chart rendering failed:', e);
+  }
+}
+
+/** Charts of the currently presented slide (rendered from their own render cache). */
+function paintPresentCharts() {
+  if (!state.present) return;
+  paintCharts(presentHostEl, state.present.charts);
+}
+
+/**
+ * Two ECharts instance registries exist: chartRenderer's singleton (used for pptxToHtml output)
+ * and the renderer module's own map (used for model-rendered charts). Both hold instances whose
+ * DOM has been replaced, so drop them to avoid leaks.
+ */
+function disposeStaleCharts() {
+  disposeDetachedCharts();
   const insts = (chartRenderer as any).chartInstances as Map<string, any> | undefined;
   if (!insts) return;
   for (const [id, inst] of Array.from(insts.entries())) {
@@ -290,128 +429,234 @@ function disposeDetachedCharts() {
   }
 }
 
-/** Paint charts that exist in the host using echarts (parser only emits empty placeholder divs). */
-function paintCharts(host: HTMLElement) {
-  const r = rendered[state.mode];
-  if (!r || !r.charts.length) return;
-  if (typeof (window as any).echarts === 'undefined') return; // skip silently if echarts not loaded
-  const list = r.charts.filter((c) => !!host.querySelector(`[id="${c.chartId}"]`));
-  if (!list.length) return;
-  try {
-    // Pass host as the lookup scope, so repeated copies of the same slide HTML
-    // (thumbnail / canvas / presentation) never resolve to each other's containers.
-    chartRenderer.renderCharts(list, host);
-  } catch (e: any) {
-    console.warn('[pptx-webview] Chart rendering failed:', e);
-  }
-}
-
 // ---------- Rendering ----------
 function renderAll() {
+  applyStageTransform();
+  gridEl.className = 'grid-overlay' + (state.grid ? ' on' : '');
   renderSlideList();
   renderCanvas();
   renderInspector();
-  statusCountEl.textContent = `${state.slidesHtml.length} slides`;
-  undoBtn.disabled = !state.modelCanUndo;
-  redoBtn.disabled = !state.modelCanRedo;
+  statusCountEl.textContent = `${slideCount()} slides`;
+  undoBtn.disabled = state.mode !== 'edit' || !store.canUndo();
+  redoBtn.disabled = state.mode !== 'edit' || !store.canRedo();
   if (docInfoEl.classList.contains('on')) renderDocInfo();
+}
+
+function slideCount(): number {
+  return state.mode === 'edit' ? store.slideCount : state.preview?.slides.length || 0;
 }
 
 function renderSlideList() {
   slideListEl.innerHTML = '';
-  const thumbsW = 160;
-  const scale = thumbsW / state.slideSize.width;
-  state.slidesHtml.forEach((html, i) => {
-    const inner = h('div', { class: 'inner', html });
-    inner.style.width = state.slideSize.width + 'px';
-    inner.style.height = state.slideSize.height + 'px';
-    inner.style.transform = `scale(${scale})`;
-    const thumb = h(
-      'div',
-      {
-        class: 'thumb' + (i === state.current ? ' active' : ''),
-        style: `width:${thumbsW}px;height:${thumbsW * (state.slideSize.height / state.slideSize.width)}px`,
-        onclick: () => selectSlide(i)
-      },
-      [inner, h('span', { class: 'num' }, [String(i + 1)])]
-    );
+  const count = slideCount();
+  for (let i = 0; i < count; i++) {
+    const thumb = h('div', { class: 'thumb' + (i === state.current ? ' active' : ''), onclick: () => selectSlide(i) });
+    if (state.mode === 'edit') {
+      renderThumbInto(thumb, store.doc.slides[i], store.doc);
+    } else {
+      const htmls = state.preview?.slides || [];
+      const scale = (thumb.clientWidth || 160) / state.slideSize.width;
+      const inner = h('div', { class: 'inner' });
+      inner.style.width = state.slideSize.width + 'px';
+      inner.style.height = state.slideSize.height + 'px';
+      inner.style.transform = `scale(${scale})`;
+      inner.innerHTML = htmls[i] || '';
+      thumb.style.height = Math.round(state.slideSize.height * scale) + 'px';
+      thumb.appendChild(inner);
+    }
+    thumb.append(h('span', { class: 'num' }, [String(i + 1)]));
     slideListEl.append(thumb);
-  });
+  }
 }
 
 function renderCanvas() {
-  applyStageTransform();
-  gridEl.className = 'grid-overlay' + (state.grid ? ' on' : '');
-  disposeDetachedCharts();
-  const html = state.slidesHtml[state.current] || '';
-  slideHostEl.innerHTML = html;
-  paintCharts(slideHostEl);
-  if (state.mode === 'edit') buildOverlay();
-  else overlayEl.innerHTML = '';
+  disposeStaleCharts();
+  if (state.mode === 'edit') {
+    const slide = store.slide;
+    if (!slide) return;
+    renderSlideInto(slideHostEl, slide, store.doc, { grid: state.grid, editingId: store.editingId });
+    buildOverlay();
+  } else {
+    slideHostEl.innerHTML = state.preview?.slides[state.current] || '';
+    paintCharts(slideHostEl);
+    overlayEl.innerHTML = '';
+  }
 }
 
+// ---------- Selection overlay (geometry from the parser core) ----------
 function buildOverlay() {
   overlayEl.innerHTML = '';
-  const slide = state.model?.slides?.[state.current];
-  if (!slide || !Array.isArray(slide.elements)) return;
-  slide.elements.forEach((el: any, idx: number) => {
-    if (el == null) return;
-    const x = num(el.x), y = num(el.y), w = num(el.width), hgt = num(el.height);
-    if (![x, y, w, hgt].every(Number.isFinite)) return;
+  const slide = store.slide;
+  if (!slide) return;
+  for (const el of slide.elements || []) {
+    if (el.hidden) continue;
+    const r = elementRect(el);
+    const m = effectMargin(el);
+    const selected = store.sel.includes(el.id);
     const rect = h('div', {
-      class: 'sel-rect' + (state.selected?.slide === state.current && state.selected?.element === idx ? ' selected' : ''),
-      style: `left:${x}px;top:${y}px;width:${w}px;height:${hgt}px`,
-      'data-idx': String(idx)
+      class: 'sel-rect' + (selected ? ' selected' : '') + (el.locked ? ' locked' : ''),
+      'data-id': el.id,
+      style:
+        `left:${r.x - m.left}px;top:${r.y - m.top}px;` +
+        `width:${r.width + m.left + m.right}px;height:${r.height + m.top + m.bottom}px;` +
+        `transform:${el.rotation ? `rotate(${el.rotation}deg)` : ''}`
     });
-    const dirs = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
-    for (const d of dirs) rect.append(h('div', { class: 'handle ' + d, 'data-dir': d }));
-    rect.addEventListener('pointerdown', (e) => onElementPointerDown(e, idx));
+    if (!selected) {
+      rect.style.background = 'transparent';
+      rect.style.borderColor = 'rgba(66,133,244,.5)';
+      rect.style.pointerEvents = 'none';
+    } else {
+      rect.addEventListener('pointerdown', (e) => onRectPointerDown(e, el));
+      if (!el.locked) {
+        for (const d of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']) {
+          rect.append(h('div', { class: 'handle ' + d, 'data-dir': d }));
+        }
+        const rot = h('div', { class: 'handle rot', 'data-dir': 'rot', title: 'Rotate (hold Shift to snap 15°)' });
+        rot.style.top = '-24px';
+        rect.append(rot);
+      }
+    }
+    if (el.locked) rect.append(h('span', { class: 'lock-badge' }, ['🔒']));
     overlayEl.append(rect);
+  }
+}
+
+/** Cheap redraw used while the selection changes (keeps the canvas DOM untouched). */
+function renderSelection() {
+  buildOverlay();
+  // Reflect the selection on the rendered elements too (used to unlock media controls)
+  slideHostEl.querySelectorAll('.el[data-id]').forEach((node) => {
+    node.classList.toggle('is-sel', store.sel.includes((node as HTMLElement).dataset.id!));
   });
 }
 
+// ---------- Drag / Resize / Rotate ----------
+function onRectPointerDown(e: PointerEvent, el: any) {
+  e.preventDefault();
+  e.stopPropagation();
+  const dir = (e.target as HTMLElement).getAttribute('data-dir');
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const orig = { x: num(el.x), y: num(el.y), w: num(el.width), h: num(el.height), rot: num(el.rotation) };
+  const center = { x: orig.x + orig.w / 2, y: orig.y + orig.h / 2 };
+  const startAngle = Math.atan2(e.clientY - center.y, e.clientX - center.x);
+  const box = (e.currentTarget as HTMLElement);
+  box.setPointerCapture(e.pointerId);
+  // One history entry per gesture: snapshot up-front, then apply without history
+  store.snapshot();
+
+  const apply = (patch: any) => {
+    store.update((doc: any) => {
+      const target = store.findElement(el.id);
+      if (!target) return;
+      Object.assign(target, patch);
+    }, { history: false });
+    const target: any = store.findElement(el.id);
+    if (!target) return;
+    const r = elementRect(target);
+    const m = effectMargin(target);
+    box.style.left = r.x - m.left + 'px';
+    box.style.top = r.y - m.top + 'px';
+    box.style.width = r.width + m.left + m.right + 'px';
+    box.style.height = r.height + m.top + m.bottom + 'px';
+    box.style.transform = target.rotation ? `rotate(${target.rotation}deg)` : '';
+  };
+
+  const onMove = (ev: PointerEvent) => {
+    const dx = (ev.clientX - startX) / state.zoom;
+    const dy = (ev.clientY - startY) / state.zoom;
+    if (dir === 'rot') {
+      // Rotate around the element centre; hold Shift to snap to 15°
+      const ang = Math.atan2(ev.clientY - center.y, ev.clientX - center.x);
+      let next = orig.rot + ((ang - startAngle) * 180) / Math.PI;
+      if (ev.shiftKey) next = Math.round(next / 15) * 15;
+      next = ((next + 180) % 360) - 180;
+      apply({ rotation: Math.round(next * 10) / 10 });
+      return;
+    }
+    if (!dir) {
+      apply({ x: Math.round(orig.x + dx), y: Math.round(orig.y + dy) });
+      return;
+    }
+    // Resize: rotate the pointer delta into the element's local frame so that rotated
+    // elements still resize along their own axes
+    const rad = (-orig.rot * Math.PI) / 180;
+    const ldx = dx * Math.cos(rad) - dy * Math.sin(rad);
+    const ldy = dx * Math.sin(rad) + dy * Math.cos(rad);
+    const sx = dir.includes('w') ? -1 : dir.includes('e') ? 1 : 0;
+    const sy = dir.includes('n') ? -1 : dir.includes('s') ? 1 : 0;
+    let nw = orig.w;
+    let nh = orig.h;
+    if (sx) nw = Math.max(8, orig.w + sx * ldx);
+    if (sy) nh = Math.max(8, orig.h + sy * ldy);
+    if (ev.shiftKey && sx && sy) {
+      const s = Math.max(nw / orig.w, nh / orig.h);
+      nw = orig.w * s;
+      nh = orig.h * s;
+    }
+    // The grabbed handle stays under the cursor: shift the centre by half the size delta,
+    // then rotate that offset back into page coordinates.
+    const lox = (sx * (nw - orig.w)) / 2;
+    const loy = (sy * (nh - orig.h)) / 2;
+    const rad2 = (orig.rot * Math.PI) / 180;
+    const cx = orig.x + orig.w / 2 + lox * Math.cos(rad2) - loy * Math.sin(rad2);
+    const cy = orig.y + orig.h / 2 + lox * Math.sin(rad2) + loy * Math.cos(rad2);
+    apply({
+      width: Math.round(nw),
+      height: Math.round(nh),
+      x: Math.round(cx - nw / 2),
+      y: Math.round(cy - nh / 2)
+    });
+  };
+
+  const onUp = (ev: PointerEvent) => {
+    box.releasePointerCapture(ev.pointerId);
+    box.removeEventListener('pointermove', onMove);
+    box.removeEventListener('pointerup', onUp);
+    state.version++;
+    renderAll();
+    syncSoon();
+  };
+  box.addEventListener('pointermove', onMove);
+  box.addEventListener('pointerup', onUp);
+}
+
+// ---------- Inspector ----------
 function renderInspector() {
-  // No properties panel in preview mode
   if (state.mode !== 'edit') {
     inspectorEl.innerHTML = '';
     return;
   }
-  // Don't rebuild while editing text to avoid losing focus
-  if (state.editingText && state.selected) return;
+  if (state.editingText && store.sel.length) return; // don't rebuild while typing (keeps focus)
   inspectorEl.innerHTML = '';
-  const slide = state.model?.slides?.[state.current];
-
-  inspectorEl.append(h('h3', {}, ['Slide ' + (state.current + 1) + ' / ' + state.slidesHtml.length]));
+  const slide = store.slide;
+  const count = store.slideCount;
+  inspectorEl.append(h('h3', {}, ['Slide ' + (state.current + 1) + ' / ' + count]));
 
   // Element list
   const list = h('ul', { class: 'el-list' });
-  if (slide && Array.isArray(slide.elements)) {
-    slide.elements.forEach((el: any, idx: number) => {
-      const tag = elSnippet(el);
-      const li = h(
+  for (const el of slide?.elements || []) {
+    const tag = elSnippet(el);
+    list.append(
+      h(
         'li',
         {
-          class: state.selected?.slide === state.current && state.selected?.element === idx ? 'active' : '',
-          onclick: () => selectElement(idx)
+          class: store.sel.includes(el.id) ? 'active' : '',
+          onclick: () => {
+            store.setSel([el.id]);
+            renderSelection();
+            renderInspector();
+          }
         },
         [h('span', {}, [tag.name]), h('span', { class: 'tag' }, [tag.type])]
-      );
-      list.append(li);
-    });
+      )
+    );
   }
   inspectorEl.append(h('h4', {}, ['Elements (click to select)']), list);
 
-  if (!state.selected) {
-    renderSlideInspector(slide);
-  } else {
-    const el = slide?.elements?.[state.selected.element];
-    if (!el) {
-      state.selected = null;
-      renderSlideInspector(slide);
-    } else {
-      renderElementInspector(el);
-    }
-  }
+  const selected = store.sel.length === 1 ? store.findElement(store.sel[0]) : null;
+  if (!selected) renderSlideInspector(slide);
+  else renderElementInspector(selected);
 }
 
 function elSnippet(el: any): { name: string; type: string } {
@@ -441,88 +686,134 @@ function elSnippet(el: any): { name: string; type: string } {
 
 // ---- Slide-level properties ----
 function renderSlideInspector(slide: any) {
-  if (!slide) return;
   inspectorEl.append(h('h4', {}, ['Slide Properties']));
 
-  const bg = colorField('Background', slide.background && typeof slide.background === 'string' ? slide.background : '#ffffff', (v) =>
-    sendOp({ kind: 'slideUpdate', index: state.current, patch: { background: v } })
+  inspectorEl.append(
+    colorField(
+      'Background',
+      slide?.background && typeof slide.background === 'string' ? slide.background : '#ffffff',
+      (v) => runAction(() => actions.setBackground(v))
+    )
   );
-  inspectorEl.append(bg);
 
-  const hidden = h('input', { type: 'checkbox', ...(slide.hidden ? { checked: 'checked' } : {}) });
-  hidden.addEventListener('change', () => sendOp({ kind: 'slideUpdate', index: state.current, patch: { hidden: hidden.checked } }));
+  const hidden = h('input', { type: 'checkbox', ...(slide?.hidden ? { checked: 'checked' } : {}) });
+  hidden.addEventListener('change', () =>
+    runAction(() => store.update((doc: any) => {
+      doc.slides[store.slideIndex].hidden = hidden.checked;
+    }))
+  );
   inspectorEl.append(h('div', { class: 'field' }, [h('label', {}, ['Hidden']), hidden]));
 
-  const notes = h('textarea', { placeholder: 'Speaker notes...' }, [slide.notes || '']);
-  notes.addEventListener('input', debounce(() => sendOp({ kind: 'slideUpdate', index: state.current, patch: { notes: notes.value } }), 400));
+  const notes = h('textarea', { placeholder: 'Speaker notes...' }, [slide?.notes || '']);
+  notes.addEventListener('focus', () => (state.editingText = true));
+  notes.addEventListener('blur', () => (state.editingText = false));
+  notes.addEventListener(
+    'input',
+    debounce(() => runAction(() => actions.setNotes(notes.value), { skipSync: true }), 400)
+  );
   inspectorEl.append(h('div', { class: 'field', style: 'align-items:flex-start' }, [h('label', {}, ['Notes']), notes]));
 
   // Slide actions
   inspectorEl.append(h('h4', {}, ['Slide Actions']));
-  const addText = h('button', { class: 'btn', onclick: () => addTextElement() }, ['+ Text Box']);
-  const addShape = h('button', { class: 'btn', onclick: () => addShapeElement('rect') }, ['+ Rectangle']);
-  const addImg = h('button', { class: 'btn', onclick: pickImage }, ['+ Image']);
-  inspectorEl.append(h('div', { class: 'row' }, [addText, addShape, addImg]));
-
-  const dup = h('button', { class: 'btn', onclick: () => sendOp({ kind: 'slideDuplicate', index: state.current }) }, ['Duplicate']);
-  const del = h('button', { class: 'btn', onclick: () => { if (confirm('Delete this slide?')) sendOp({ kind: 'slideDelete', index: state.current }); } }, ['Delete']);
-  const up = h('button', { class: 'btn', onclick: () => sendOp({ kind: 'slideMove', from: state.current, to: Math.max(0, state.current - 1) }) }, ['Move Up']);
-  const down = h('button', { class: 'btn', onclick: () => sendOp({ kind: 'slideMove', from: state.current, to: Math.min(state.slidesHtml.length - 1, state.current + 1) }) }, ['Move Down']);
-  inspectorEl.append(h('div', { class: 'row' }, [dup, del]));
-  inspectorEl.append(h('div', { class: 'row' }, [up, down]));
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      h('button', { class: 'btn', onclick: () => addTextElement() }, ['+ Text Box']),
+      h('button', { class: 'btn', onclick: () => addShapeElement('rect') }, ['+ Rectangle']),
+      h('button', { class: 'btn', onclick: pickImage }, ['+ Image'])
+    ])
+  );
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.duplicateSlide(state.current)) }, ['Duplicate']),
+      h('button', {
+        class: 'btn',
+        onclick: () => {
+          if (confirm('Delete this slide?')) runAction(() => actions.deleteSlide(state.current));
+        }
+      }, ['Delete'])
+    ])
+  );
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.moveSlide(state.current, Math.max(0, state.current - 1))) }, ['Move Up']),
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.moveSlide(state.current, Math.min(store.slideCount - 1, state.current + 1))) }, ['Move Down'])
+    ])
+  );
 }
 
 // ---- Element-level properties ----
 function renderElementInspector(el: any) {
   inspectorEl.append(h('h4', {}, ['Element: ' + (el.type || 'unknown')]));
 
-  // Geometry
+  const update = (patch: any) => runAction(() => actions.updateElement(el.id, patch));
   const geom = h('div', {});
-  geom.append(numField('X', el.x, (v) => updateEl({ x: v })));
-  geom.append(numField('Y', el.y, (v) => updateEl({ y: v })));
-  geom.append(numField('Width', el.width, (v) => updateEl({ width: Math.max(1, v) })));
-  geom.append(numField('Height', el.height, (v) => updateEl({ height: Math.max(1, v) })));
-  geom.append(numField('Rotation', el.rotation, (v) => updateEl({ rotation: v })));
+  geom.append(numField('X', el.x, (v) => update({ x: v })));
+  geom.append(numField('Y', el.y, (v) => update({ y: v })));
+  geom.append(numField('Width', el.width, (v) => update({ width: Math.max(1, v) })));
+  geom.append(numField('Height', el.height, (v) => update({ height: Math.max(1, v) })));
+  geom.append(numField('Rotation', el.rotation, (v) => update({ rotation: v })));
   inspectorEl.append(geom);
 
-  // Type-specific
   if (el.type === 'text') {
     const ta = h('textarea', { placeholder: 'Text content...' }, [el.text || '']);
     ta.addEventListener('focus', () => (state.editingText = true));
-    ta.addEventListener('blur', () => { state.editingText = false; });
-    ta.addEventListener('input', debounce(() => { updateElLocal({ text: ta.value }); sendOp({ kind: 'elementUpdate', slide: state.current, element: state.selected!.element, patch: { text: ta.value } }); }, 400));
+    ta.addEventListener('blur', () => (state.editingText = false));
+    ta.addEventListener(
+      'input',
+      debounce(() => runAction(() => actions.updateElement(el.id, { text: ta.value }, { history: false })), 400)
+    );
     inspectorEl.append(h('div', { class: 'field', style: 'align-items:flex-start' }, [h('label', {}, ['Text']), ta]));
 
-    inspectorEl.append(colorField('Color', el.color || '#1e1e1e', (v) => updateEl({ color: v })));
-    inspectorEl.append(numField('Font Size', el.fontSize, (v) => updateEl({ fontSize: v })));
-    inspectorEl.append(selectField('Align', ['left', 'center', 'right', 'justify'], el.align || 'left', (v) => updateEl({ align: v })));
-    inspectorEl.append(selectField('Vertical', ['top', 'middle', 'bottom'], el.valign || 'top', (v) => updateEl({ valign: v })));
-    inspectorEl.append(checkField('Bold', !!el.bold, (v) => updateEl({ bold: v })));
-    inspectorEl.append(checkField('Italic', !!el.italic, (v) => updateEl({ italic: v })));
-    inspectorEl.append(checkField('Underline', !!el.underline, (v) => updateEl({ underline: v })));
+    inspectorEl.append(colorField('Color', el.color || '#1e1e1e', (v) => update({ color: v })));
+    inspectorEl.append(numField('Font Size', el.fontSize, (v) => update({ fontSize: v })));
+    inspectorEl.append(selectField('Align', ['left', 'center', 'right', 'justify'], el.align || 'left', (v) => update({ align: v })));
+    inspectorEl.append(selectField('Vertical', ['top', 'middle', 'bottom'], el.valign || 'top', (v) => update({ valign: v })));
+    inspectorEl.append(checkField('Bold', !!el.bold, (v) => actions.applyTextStyleSel({ bold: v }) && runAction(() => {})));
+    inspectorEl.append(checkField('Italic', !!el.italic, (v) => runAction(() => actions.applyTextStyleSel({ italic: v }))));
+    inspectorEl.append(checkField('Underline', !!el.underline, (v) => runAction(() => actions.applyTextStyleSel({ underline: v }))));
   } else if (el.type === 'shape') {
-    inspectorEl.append(textField('Shape', el.shapeType || 'rect', (v) => updateEl({ shapeType: v })));
+    inspectorEl.append(textField('Shape', el.shapeType || 'rect', (v) => update({ shapeType: v })));
     const fillVal = typeof el.fill === 'string' ? el.fill : (el.fill && el.fill.color) || '#4285f4';
-    inspectorEl.append(colorField('Fill', fillVal, (v) => updateEl({ fill: v })));
-    const lineColor = el.line && el.line !== 'none' ? (el.line.color || '#000') : '#000';
-    const lineWidth = el.line && el.line !== 'none' ? (el.line.width || 1) : 1;
-    inspectorEl.append(colorField('Border Color', lineColor, (v) => updateEl({ line: { color: v, width: lineWidth } })));
-    inspectorEl.append(numField('Border Width', lineWidth, (v) => updateEl({ line: v > 0 ? { color: lineColor, width: v } : 'none' })));
+    inspectorEl.append(colorField('Fill', fillVal, (v) => update({ fill: v })));
+    const lineColor = el.line && el.line !== 'none' ? el.line.color || '#000' : '#000';
+    const lineWidth = el.line && el.line !== 'none' ? el.line.width || 1 : 1;
+    inspectorEl.append(colorField('Border Color', lineColor, (v) => update({ line: { color: v, width: lineWidth } })));
+    inspectorEl.append(numField('Border Width', lineWidth, (v) => update({ line: v > 0 ? { color: lineColor, width: v } : 'none' })));
   } else if (el.type === 'image') {
-    const replace = h('button', { class: 'btn', onclick: pickImage }, ['Replace Image']);
-    inspectorEl.append(h('div', { class: 'row' }, [replace]));
-    inspectorEl.append(h('div', { class: 'empty' }, ['Image content comes from preview. Select a local file to replace.']));
+    inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', onclick: pickImage }, ['Replace Image'])]));
+    inspectorEl.append(h('div', { class: 'empty' }, ['Select a local file to replace the image.']));
   } else {
     inspectorEl.append(h('div', { class: 'empty' }, ['This type only supports move / resize / delete']));
   }
 
   // Element actions
   inspectorEl.append(h('h4', {}, ['Element Actions']));
-  const del = h('button', { class: 'btn', onclick: () => sendOp({ kind: 'elementDelete', slide: state.current, element: state.selected!.element }) }, ['Delete']);
-  const fwd = h('button', { class: 'btn', onclick: () => reorderEl(1) }, ['Bring Forward']);
-  const bwd = h('button', { class: 'btn', onclick: () => reorderEl(-1) }, ['Send Backward']);
-  inspectorEl.append(h('div', { class: 'row' }, [del]));
-  inspectorEl.append(h('div', { class: 'row' }, [fwd, bwd]));
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.duplicateSelected()) }, ['Duplicate']),
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.deleteSelected()) }, ['Delete'])
+    ])
+  );
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.zOrder('front')) }, ['Bring Front']),
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.zOrder('back')) }, ['Send Back'])
+    ])
+  );
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      h('button', { class: 'btn', title: 'Align left edge to slide', onclick: () => runAction(() => actions.alignElements('left')) }, ['Align L']),
+      h('button', { class: 'btn', title: 'Align horizontal centre', onclick: () => runAction(() => actions.alignElements('hcenter')) }, ['Align C']),
+      h('button', { class: 'btn', title: 'Align top edge to slide', onclick: () => runAction(() => actions.alignElements('top')) }, ['Align T']),
+      h('button', { class: 'btn', title: 'Align vertical centre', onclick: () => runAction(() => actions.alignElements('vcenter')) }, ['Align M'])
+    ])
+  );
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.toggleLock()) }, [el.locked ? 'Unlock' : 'Lock']),
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.toggleHidden()) }, [el.hidden ? 'Show' : 'Hide'])
+    ])
+  );
 }
 
 // ---------- Field builders ----------
@@ -558,58 +849,34 @@ function toHex(v: any): string {
   return '#ffffff';
 }
 
-// ---------- Selection / Operations ----------
+// ---------- Slide selection ----------
 function selectSlide(i: number) {
-  state.current = clamp(i, 0, state.slidesHtml.length - 1);
-  state.selected = null;
-  renderSlideList();
-  renderCanvas();
-  renderInspector();
-}
-function selectElement(idx: number) {
-  if (state.mode !== 'edit') return;
-  state.selected = { slide: state.current, element: idx };
-  renderSlideList();
-  renderCanvas();
-  renderInspector();
-}
-function sendOp(op: any) {
-  post({ type: 'op', op });
-}
-function updateEl(patch: any) {
-  if (!state.selected) return;
-  updateElLocal(patch);
-  sendOp({ kind: 'elementUpdate', slide: state.selected.slide, element: state.selected.element, patch });
-}
-function updateElLocal(patch: any) {
-  if (!state.selected) return;
-  const el = state.model?.slides?.[state.selected.slide]?.elements?.[state.selected.element];
-  if (el) Object.assign(el, patch);
+  state.current = clamp(i, 0, slideCount() - 1);
+  if (state.mode === 'edit') store.setSlide(state.current);
+  renderAll();
 }
 
-function reorderEl(dir: number) {
-  if (!state.selected) return;
-  const from = state.selected.element;
-  const to = from + dir;
-  const len = state.model.slides[state.selected.slide].elements.length;
-  if (to < 0 || to >= len) return;
-  sendOp({ kind: 'elementReorder', slide: state.selected.slide, from, to });
-  state.selected.element = to;
-}
-
+// ---------- Element creation ----------
 function addTextElement() {
-  sendOp({
-    kind: 'elementAdd',
-    slide: state.current,
-    element: { type: 'text', x: 120, y: 120, width: 480, height: 90, text: 'Double-click to edit text', fontSize: 24, color: '#1e1e1e', align: 'left', valign: 'top' }
-  });
+  runAction(() =>
+    actions.addElement({
+      type: 'text',
+      x: 120,
+      y: 120,
+      width: 480,
+      height: 90,
+      text: 'Double-click to edit text',
+      fontSize: 24,
+      color: '#1e1e1e',
+      align: 'left',
+      valign: 'top'
+    })
+  );
 }
 function addShapeElement(shapeType: string) {
-  sendOp({
-    kind: 'elementAdd',
-    slide: state.current,
-    element: { type: 'shape', shapeType, x: 200, y: 200, width: 200, height: 120, fill: '#4285f4', line: { color: '#000', width: 1 } }
-  });
+  runAction(() =>
+    actions.addElement({ type: 'shape', shapeType, x: 200, y: 200, width: 200, height: 120, fill: '#4285f4', line: { color: '#000', width: 1 } })
+  );
 }
 function pickImage() {
   const input = h('input', { type: 'file', accept: 'image/*', style: 'display:none' });
@@ -623,7 +890,12 @@ function pickImage() {
       img.onload = () => {
         const w = 360;
         const hgt = Math.round((img.height / img.width) * w) || 240;
-        sendOp({ kind: 'elementAdd', slide: state.current, element: { type: 'image', data: dataUrl, x: 160, y: 160, width: w, height: hgt } });
+        const replaceId = store.sel.length === 1 && store.findElement(store.sel[0])?.type === 'image' ? store.sel[0] : null;
+        runAction(() =>
+          replaceId
+            ? actions.updateElement(replaceId, { data: dataUrl })
+            : actions.addElement({ type: 'image', data: dataUrl, x: 160, y: 160, width: w, height: hgt })
+        );
       };
       img.src = dataUrl;
     };
@@ -633,57 +905,7 @@ function pickImage() {
   input.click();
 }
 
-// ---------- Drag / Resize ----------
-function onElementPointerDown(e: PointerEvent, idx: number) {
-  e.preventDefault();
-  e.stopPropagation();
-  state.selected = { slide: state.current, element: idx };
-  renderInspector();
-  buildOverlaySelected();
-
-  const el = state.model.slides[state.current].elements[idx];
-  const dir = (e.target as HTMLElement).getAttribute('data-dir');
-  const startX = e.clientX, startY = e.clientY;
-  const orig = { x: num(el.x), y: num(el.y), w: num(el.width), h: num(el.height) };
-  const rectEl = (e.currentTarget as HTMLElement);
-  rectEl.setPointerCapture(e.pointerId);
-
-  const onMove = (ev: PointerEvent) => {
-    const dx = (ev.clientX - startX) / state.zoom;
-    const dy = (ev.clientY - startY) / state.zoom;
-    let nx = orig.x, ny = orig.y, nw = orig.w, nh = orig.h;
-    if (!dir) {
-      nx = orig.x + dx; ny = orig.y + dy;
-    } else {
-      if (dir.includes('e')) nw = Math.max(10, orig.w + dx);
-      if (dir.includes('s')) nh = Math.max(10, orig.h + dy);
-      if (dir.includes('w')) { nx = orig.x + dx; nw = Math.max(10, orig.w - dx); }
-      if (dir.includes('n')) { ny = orig.y + dy; nh = Math.max(10, orig.h - dy); }
-    }
-    Object.assign(el, { x: nx, y: ny, width: nw, height: nh });
-    rectEl.style.left = nx + 'px';
-    rectEl.style.top = ny + 'px';
-    rectEl.style.width = nw + 'px';
-    rectEl.style.height = nh + 'px';
-  };
-  const onUp = (ev: PointerEvent) => {
-    rectEl.releasePointerCapture(ev.pointerId);
-    rectEl.removeEventListener('pointermove', onMove);
-    rectEl.removeEventListener('pointerup', onUp);
-    sendOp({ kind: 'elementUpdate', slide: state.current, element: idx, patch: { x: num(el.x), y: num(el.y), width: num(el.width), height: num(el.height) } });
-    renderInspector();
-  };
-  rectEl.addEventListener('pointermove', onMove);
-  rectEl.addEventListener('pointerup', onUp);
-}
-function buildOverlaySelected() {
-  overlayEl.querySelectorAll('.sel-rect').forEach((r) => {
-    const idx = Number((r as HTMLElement).getAttribute('data-idx'));
-    (r as HTMLElement).className = 'sel-rect' + (state.selected?.element === idx ? ' selected' : '');
-  });
-}
-
-// ---------- Grid / Presentation ----------
+// ---------- Grid / Presentation / Document info ----------
 function toggleGrid() {
   state.grid = !state.grid;
   gridEl.className = 'grid-overlay' + (state.grid ? ' on' : '');
@@ -715,10 +937,7 @@ function kvTable(obj: any, labels?: Record<string, string>) {
   const table = h('table', { class: 'kv' });
   for (const k of keys) {
     table.append(
-      h('tr', {}, [
-        h('td', { class: 'k' }, [labels?.[k] || k]),
-        h('td', { class: 'v' }, [String(obj[k])])
-      ])
+      h('tr', {}, [h('td', { class: 'k' }, [labels?.[k] || k]), h('td', { class: 'v' }, [String(obj[k])])])
     );
   }
   return table;
@@ -726,7 +945,6 @@ function kvTable(obj: any, labels?: Record<string, string>) {
 
 /** Render document properties: metadata (core.xml) + custom properties (custom.xml) */
 function renderDocInfo() {
-  const r = rendered[state.mode];
   docInfoEl.innerHTML = '';
   docInfoEl.append(
     h('div', { class: 'doc-info-head' }, [
@@ -734,245 +952,197 @@ function renderDocInfo() {
       h('button', { class: 'btn', style: 'padding:2px 8px', onclick: () => docInfoEl.classList.remove('on') }, ['Close'])
     ])
   );
-  docInfoEl.append(h('h4', {}, ['Metadata']), kvTable(r?.metadata, META_LABELS));
-  docInfoEl.append(h('h4', {}, ['Custom Properties']), kvTable(r?.customProps));
+  const source = state.mode === 'edit' ? store.doc : state.preview;
+  docInfoEl.append(h('h4', {}, ['Metadata']), kvTable(source?.metadata, META_LABELS));
+  docInfoEl.append(h('h4', {}, ['Custom Properties']), kvTable(source?.customProps));
 }
 
-function startPresent() {
+async function startPresent() {
   presentEl.className = 'present on';
-  renderPresent();
+  await renderPresent();
 }
-function renderPresent() {
-  disposeDetachedCharts();
+async function renderPresent() {
+  // Present the most faithful rendering available: the current bytes through pptxToHtml
+  disposeStaleCharts();
+  if (!state.present || state.present.version !== state.version) {
+    try {
+      const bytes = state.latest;
+      if (!bytes?.length) return;
+      const result = await pptxToHtml(bytes, PARSE_OPTS);
+      state.present = { slides: result.slides.map((s: any) => s.html), charts: result.charts || [], version: state.version };
+    } catch (e: any) {
+      toast('Present failed: ' + (e?.message || String(e)), 'error');
+      return;
+    }
+  }
+  const html = state.present.slides[state.current] || '';
   presentHostEl.style.width = state.slideSize.width + 'px';
   presentHostEl.style.height = state.slideSize.height + 'px';
-  presentHostEl.innerHTML = state.slidesHtml[state.current] || '';
-  paintCharts(presentHostEl);
-  // Try to autoplay with sound (presentation is entered via a user gesture, so this is allowed)
-  presentHostEl.querySelectorAll('video').forEach((v) => {
-    v.play().catch(() => { /* autoplay may still be blocked; controls remain available */ });
+  presentHostEl.innerHTML = html;
+  // Charts need a measurable host, and media should only start once layout settled
+  requestAnimationFrame(() => {
+    if (state.present) paintPresentCharts();
+    presentHostEl.querySelectorAll('video').forEach((v) => {
+      v.play().catch(() => {
+        /* autoplay may still be blocked; controls remain available */
+      });
+    });
   });
   const z = Math.min(window.innerWidth / state.slideSize.width, window.innerHeight / state.slideSize.height) * 0.96;
   presentHostEl.style.transform = `scale(${z})`;
 }
 function presentNext() {
-  if (state.current < state.slidesHtml.length - 1) {
+  const total = state.present?.slides.length || slideCount();
+  if (state.current < total - 1) {
     state.current++;
     renderPresent();
+    if (state.mode === 'edit') store.setSlide(state.current);
+    renderAll();
   } else {
-    endPresent();
+    presentEl.className = 'present';
+    disposeStaleCharts();
   }
-}
-function endPresent() {
-  presentEl.className = 'present';
-}
-function presentPrev() {
-  if (state.current > 0) { state.current--; renderPresent(); }
 }
 
 // ---------- Context menu ----------
-type CtxItem = { label?: string; action?: () => void; disabled?: boolean; sep?: boolean };
 function showCtxMenu(x: number, y: number) {
+  const items: { label: string; disabled?: boolean; onClick?: () => void }[] = [];
+  if (state.mode === 'edit') {
+    const hasSel = store.sel.length > 0;
+    items.push(
+      { label: 'Bring Front', disabled: !hasSel, onClick: () => runAction(() => actions.zOrder('front')) },
+      { label: 'Send Back', disabled: !hasSel, onClick: () => runAction(() => actions.zOrder('back')) },
+      { label: 'Duplicate', disabled: !hasSel, onClick: () => runAction(() => actions.duplicateSelected()) },
+      { label: 'Delete', disabled: !hasSel, onClick: () => runAction(() => actions.deleteSelected()) },
+      { label: '', onClick: () => {} },
+      { label: store.selected().some((el: any) => el.locked) ? 'Unlock' : 'Lock', disabled: !hasSel, onClick: () => runAction(() => actions.toggleLock()) },
+      { label: 'Select All', onClick: () => { actions.selectAll(); renderAll(); } },
+      { label: '', onClick: () => {} },
+      { label: 'Group', disabled: store.sel.length < 2, onClick: () => runAction(() => actions.groupSelection()) },
+      { label: 'Ungroup', onClick: () => runAction(() => actions.ungroupSelection()) }
+    );
+  } else {
+    items.push(
+      { label: 'Edit', onClick: () => toggleMode() },
+      { label: 'Document Properties', onClick: () => toggleDocInfo() }
+    );
+  }
+
   ctxMenuEl.innerHTML = '';
-  const items: CtxItem[] = [
-    { label: 'Present (F5)', action: startPresent },
-    { label: state.mode === 'preview' ? 'Edit' : 'Preview', action: toggleMode },
-    { label: 'Document Properties', action: toggleDocInfo },
-    { label: 'Save (Ctrl+S)', action: () => post({ type: 'save' }) },
-    { label: 'Export Copy...', action: () => post({ type: 'saveAs' }) },
-    { sep: true },
-    { label: 'Undo (Ctrl+Z)', action: () => post({ type: 'undo' }), disabled: !state.modelCanUndo },
-    { label: 'Redo (Ctrl+Y)', action: () => post({ type: 'redo' }), disabled: !state.modelCanRedo }
-  ];
   for (const it of items) {
-    if (it.sep) { ctxMenuEl.append(h('div', { class: 'ctx-sep' })); continue; }
-    const item = h('div', { class: 'ctx-item' + (it.disabled ? ' disabled' : '') }, [it.label]);
-    if (!it.disabled && it.action) {
-      item.addEventListener('click', (e) => {
-        e.stopPropagation();
-        hideCtxMenu();
-        it.action!();
-      });
+    if (!it.label) {
+      ctxMenuEl.append(h('div', { class: 'ctx-sep' }));
+      continue;
     }
-    ctxMenuEl.append(item);
+    const node = h('div', { class: 'ctx-item' + (it.disabled ? ' disabled' : '') }, [it.label]);
+    if (!it.disabled) node.addEventListener('click', () => { hideCtxMenu(); it.onClick?.(); });
+    ctxMenuEl.append(node);
   }
   ctxMenuEl.classList.add('on');
-  const mw = ctxMenuEl.offsetWidth || 180;
-  const mh = ctxMenuEl.offsetHeight || 200;
-  const left = Math.min(x, window.innerWidth - mw - 8);
-  const top = Math.min(y, window.innerHeight - mh - 8);
-  ctxMenuEl.style.left = Math.max(4, left) + 'px';
-  ctxMenuEl.style.top = Math.max(4, top) + 'px';
+  ctxMenuEl.style.left = Math.min(x, window.innerWidth - 200) + 'px';
+  ctxMenuEl.style.top = Math.min(y, window.innerHeight - 300) + 'px';
 }
 function hideCtxMenu() {
   ctxMenuEl.classList.remove('on');
 }
 
-// ---------- Message handling ----------
-/** Normalize host-provided bytes to Uint8Array (handles TypedArray / ArrayBuffer / array / base64 / plain object fallback). */
-function toBytes(v: any): Uint8Array {
-  if (v instanceof Uint8Array) return v;
-  if (v instanceof ArrayBuffer) return new Uint8Array(v);
-  if (ArrayBuffer.isView(v)) {
-    const t = v as ArrayBufferView;
-    return new Uint8Array(t.buffer, t.byteOffset, t.byteLength);
-  }
-  if (Array.isArray(v)) return Uint8Array.from(v as number[]);
-  if (typeof v === 'string') {
-    const bin = atob(v);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  }
-  if (v && typeof v === 'object') {
-    // postMessage fallback as plain object: {"0":80,"1":75,...}
-    const keys = Object.keys(v).filter((k) => /^\d+$/.test(k));
-    if (keys.length) {
-      const out = new Uint8Array(keys.length);
-      for (const k of keys) out[Number(k)] = Number(v[k]) & 0xff;
-      return out;
-    }
-  }
-  throw new Error('Unrecognized PPTX byte data');
-}
-
-/** Inject parser-produced global styles. Missing it causes colors/line-height/SVG filters to be lost (rendering corruption). */
-let injectedGlobalCss = '';
-function ensureGlobalStyles(css: string) {
-  if (!css || css === injectedGlobalCss) return;
-  let el = document.getElementById('pptx-global-css') as HTMLStyleElement | null;
-  if (!el) {
-    el = document.createElement('style');
-    el.id = 'pptx-global-css';
-    document.head.appendChild(el);
-  }
-  el.textContent = css;
-  injectedGlobalCss = css;
-}
-
-/**
- * Render bytes into per-slide HTML using pptxToHtml.
- * Consistent with examples/index.html: injects styles.global; preview mode skips hidden slides (p:sld show="0").
- */
-async function renderFromBytes(bytes: any, skipHidden = false): Promise<RenderResult> {
-  const data = toBytes(bytes);
-  if (!data.length) throw new Error('PPTX bytes are empty, cannot parse');
-  const res = await pptxToHtml(data, { mediaProcess: true, themeProcess: true });
-  if (!res) throw new Error('pptxToHtml returned no result');
-  ensureGlobalStyles(res.styles?.global || '');
-  if (res.slideSize && res.slideSize.width) {
-    state.slideSize = { width: res.slideSize.width, height: res.slideSize.height };
-  }
-  const slides = (res.slides || []) as any[];
-  return {
-    slides: (skipHidden ? slides.filter((s) => !s.hidden) : slides).map((s) => s.html),
-    charts: (res.charts || []) as any[],
-    metadata: res.metadata,
-    customProps: res.customProps
-  };
-}
-
-async function applyInit(msg: Extract<HostToWebview, { type: 'init' }>) {
-  state.model = msg.model;
-  state.title = msg.title;
-  state.current = 0;
-  state.selected = null;
-  state.mode = msg.mode || 'preview';
-  state.modelCanUndo = msg.canUndo;
-  state.modelCanRedo = msg.canRedo;
-
-  // Store render sources; only render the current mode (preview uses original bytes for faithful rendering, edit uses model round-trip result)
-  previewSrc = msg.originalBytes;
-  editSrc = msg.bytes;
-  delete rendered.preview;
-  delete rendered.edit;
-  await renderMode(state.mode);
-
-  applyMode();
-  setZoom(null);
-
-}
-async function applyUpdate(msg: Extract<HostToWebview, { type: 'update' }>) {
-  state.model = msg.model;
-  state.mode = msg.mode || state.mode;
-  state.modelCanUndo = msg.canUndo;
-  state.modelCanRedo = msg.canRedo;
-  previewSrc = msg.originalBytes;
-  editSrc = msg.bytes;
-  delete rendered.preview;
-  delete rendered.edit;
-  await renderMode(state.mode);
-
-  state.slidesHtml = rendered[state.mode]?.slides || [];
-  state.current = clamp(state.current, 0, state.slidesHtml.length - 1);
-  if (state.selected && state.selected.slide === state.current) {
-    const len = state.model?.slides?.[state.current]?.elements?.length ?? 0;
-    if (state.selected.element >= len) state.selected = null;
-  }
-  applyMode();
-}
-
 // ---------- Keyboard ----------
-function onKey(e: KeyboardEvent) {
-  const tag = (e.target as HTMLElement)?.tagName;
-  const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
-  if (presentEl.classList.contains('on')) {
-    if (e.key === 'Escape') endPresent();
-    else if (e.key === 'ArrowRight' || e.key === ' ') presentNext();
-    else if (e.key === 'ArrowLeft') presentPrev();
+function onKeyDown(e: KeyboardEvent) {
+  const target = e.target as HTMLElement;
+  const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+  if (e.key === 'Escape') {
+    if (presentEl.classList.contains('on')) {
+      presentEl.className = 'present';
+      disposeStaleCharts();
+      return;
+    }
+    if (state.mode === 'edit' && store.sel.length) {
+      store.setSel([]);
+      renderSelection();
+      renderInspector();
+    }
     return;
   }
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); post({ type: 'save' }); return; }
-  if (state.mode !== 'edit') return; // disable edit shortcuts in preview mode
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); post({ type: 'undo' }); return; }
-  if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) { e.preventDefault(); post({ type: 'redo' }); return; }
-  if ((e.key === 'F5')) { e.preventDefault(); startPresent(); return; }
   if (typing) return;
-  if ((e.key === 'Delete' || e.key === 'Backspace') && state.selected) {
+  if (presentEl.classList.contains('on')) {
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') presentNext();
+    return;
+  }
+  if (state.mode !== 'edit') return;
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.key.toLowerCase() === 'z') {
     e.preventDefault();
-    sendOp({ kind: 'elementDelete', slide: state.selected.slide, element: state.selected.element });
-    state.selected = null;
-  } else if (e.key === 'Escape') {
-    state.selected = null; renderInspector(); buildOverlaySelected();
-  } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') && state.selected) {
+    runAction(() => (e.shiftKey ? store.redo() : store.undo()));
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'y') {
+    e.preventDefault();
+    runAction(() => store.redo());
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'a') {
+    e.preventDefault();
+    actions.selectAll();
+    renderAll();
+    return;
+  }
+  const nudges: Record<string, [number, number]> = {
+    ArrowLeft: [-1, 0],
+    ArrowRight: [1, 0],
+    ArrowUp: [0, -1],
+    ArrowDown: [0, 1]
+  };
+  const nudge = nudges[e.key];
+  if (nudge && store.sel.length) {
     e.preventDefault();
     const step = e.shiftKey ? 10 : 1;
-    const el = state.model.slides[state.selected.slide].elements[state.selected.element];
-    const patch: any = {};
-    if (e.key === 'ArrowUp') patch.y = num(el.y) - step;
-    if (e.key === 'ArrowDown') patch.y = num(el.y) + step;
-    if (e.key === 'ArrowLeft') patch.x = num(el.x) - step;
-    if (e.key === 'ArrowRight') patch.x = num(el.x) + step;
-    updateEl(patch);
-    buildOverlay();
+    runAction(() => actions.nudge(nudge[0] * step, nudge[1] * step));
   }
 }
 
-// ---------- Startup ----------
-function main() {
-  injectStyle();
-  buildLayout();
-  window.addEventListener('keydown', onKey);
-  window.addEventListener('resize', () => { if (!state.userZoom) setZoom(null); });
-  window.addEventListener('message', (ev) => {
-    const msg = ev.data as HostToWebview;
-    if (!msg) return;
-    (async () => {
-      try {
-        switch (msg.type) {
-          case 'init': await applyInit(msg as any); break;
-          case 'update': await applyUpdate(msg as any); break;
-          case 'saved': break;
-          case 'info': toast(msg.message, msg.kind || 'info'); break;
-        }
-      } catch (e: any) {
-        // Never silently swallow errors: otherwise the UI would stall at "0 slides" with no feedback
-        console.error('[pptx-webview] Message handling failed:', e);
-        toast('Render failed: ' + (e?.message || String(e)), 'error');
+// ---------- Host messages ----------
+window.addEventListener('message', async (event: MessageEvent<HostToWebview>) => {
+  const msg = event.data;
+  try {
+    switch (msg.type) {
+      case 'init': {
+        state.original = toBytes(msg.originalBytes);
+        state.latest = toBytes(msg.bytes);
+        state.title = msg.title || state.title;
+        state.mode = msg.mode === 'edit' ? 'edit' : 'preview';
+        state.version++;
+        await renderPreview();
+        applyMode();
+        break;
       }
-    })();
-  });
+      case 'bytes': {
+        state.latest = toBytes(msg.bytes);
+        state.version++;
+        if (state.mode === 'preview') await renderPreview();
+        break;
+      }
+      case 'saved':
+        toast('Saved');
+        break;
+      case 'info':
+        toast(msg.message, msg.kind || 'info');
+        break;
+    }
+  } catch (e: any) {
+    console.error('[pptx-webview] Message failed:', e);
+    toast('Failed: ' + (e?.message || String(e)), 'error');
+  }
+});
+
+// ---------- Bootstrap ----------
+async function main() {
+  const style = document.createElement('style');
+  style.textContent = CSS;
+  document.head.append(style);
+  buildLayout();
   post({ type: 'ready' });
 }
-
-main();
+main().catch((e) => {
+  console.error('[pptx-webview] Init failed:', e);
+  document.body.textContent = 'Editor failed to start: ' + (e?.message || String(e));
+});
