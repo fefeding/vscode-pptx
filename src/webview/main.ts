@@ -21,7 +21,13 @@ import {
   createActions,
   elementRect,
   effectMargin,
-  FONT_LIST
+  FONT_LIST,
+  THEMES,
+  LAYOUTS,
+  SLIDE_SIZES,
+  TRANSITIONS,
+  ANIM_CLASSES,
+  ANIM_TYPES
 } from '@fefeding/ppt-parser';
 import {
   renderSlideInto,
@@ -1140,6 +1146,46 @@ function renderSlideInspector(slide: any) {
   inspectorEl.append(h('h4', {}, ['Slide Properties']));
 
   inspectorEl.append(
+    selectField(
+      'Theme',
+      THEMES.map((t: any) => t.id),
+      store.doc.theme || 'blue',
+      (v) => runAction(() => actions.applyTheme(v, true))
+    )
+  );
+  inspectorEl.append(
+    selectField(
+      'Size',
+      Object.keys(SLIDE_SIZES),
+      store.doc.sizeKey || '16:9',
+      (v) => runAction(() => actions.setSlideSize(SLIDE_SIZES[v]))
+    )
+  );
+  inspectorEl.append(
+    selectField(
+      'Transition',
+      TRANSITIONS.map((t: any) => t.value),
+      slide?.transition?.type || 'none',
+      (v) => runAction(() => actions.setTransition({ type: v, duration: 800, advanceOnClick: true }))
+    )
+  );
+  inspectorEl.append(
+    selectField(
+      'Layout',
+      LAYOUTS.map((l: any) => l.id),
+      slide?.layout || 'titleBody',
+      (v) => {
+        // Applying a layout rebuilds the slide, so it replaces the current elements
+        if (window.confirm('Applying a layout replaces every element on this slide. Continue?')) {
+          runAction(() => actions.applyLayout(v));
+        } else {
+          renderInspector();
+        }
+      }
+    )
+  );
+
+  inspectorEl.append(
     colorField(
       'Background',
       slide?.background && typeof slide.background === 'string' ? slide.background : '#ffffff',
@@ -1163,6 +1209,24 @@ function renderSlideInspector(slide: any) {
     debounce(() => runAction(() => actions.setNotes(notes.value), { skipSync: true }), 400)
   );
   inspectorEl.append(h('div', { class: 'field', style: 'align-items:flex-start' }, [h('label', {}, ['Notes']), notes]));
+
+  // ---- Animations on this slide ----
+  inspectorEl.append(h('h4', {}, ['Animations']));
+  const anims: any[] = Array.isArray(slide?.animations) ? slide.animations : [];
+  if (!anims.length) inspectorEl.append(h('div', { class: 'empty' }, ['No animations on this slide']));
+  for (let i = 0; i < anims.length; i++) {
+    const a = anims[i];
+    inspectorEl.append(
+      h('div', { class: 'row' }, [
+        h('span', { style: 'flex:1;font-size:11px' }, [`${a.presetClass || 'entr'} / ${a.type || '?'} / ${a.trigger || 'onClick'}`]),
+        h('button', { class: 'btn', title: 'Move up', onclick: () => runAction(() => actions.moveAnimation(i, -1)) }, ['↑']),
+        h('button', { class: 'btn', title: 'Move down', onclick: () => runAction(() => actions.moveAnimation(i, 1)) }, ['↓']),
+        h('button', { class: 'btn', title: 'Remove', onclick: () => runAction(() => actions.removeAnimation(i)) }, ['✕'])
+      ])
+    );
+  }
+  // Adding an animation needs a target element, so that form lives in the element panel
+  inspectorEl.append(h('div', { class: 'empty' }, ['Select an element to add animations for it.']));
 
   // Slide actions
   inspectorEl.append(h('h4', {}, ['Slide Actions']));
@@ -1363,6 +1427,54 @@ function renderElementInspector(el: any) {
     h('div', { class: 'row' }, [
       h('button', { class: 'btn', onclick: () => runAction(() => actions.toggleLock()) }, [el.locked ? 'Unlock' : 'Lock']),
       h('button', { class: 'btn', onclick: () => runAction(() => actions.toggleHidden()) }, [el.hidden ? 'Show' : 'Hide'])
+    ])
+  );
+
+  // ---- Animations targeting this element ----
+  inspectorEl.append(h('h4', {}, ['Animations']));
+  const allAnims: any[] = Array.isArray(store.slide?.animations) ? store.slide.animations : [];
+  const mine = allAnims.map((a: any, i: number) => ({ a, i })).filter((t: any) => t.a.target === el.id);
+  if (!mine.length) inspectorEl.append(h('div', { class: 'empty' }, ['No animation on this element']));
+  for (const t of mine) {
+    inspectorEl.append(
+      h('div', { class: 'row' }, [
+        h('span', { style: 'flex:1;font-size:11px' }, [`${t.a.presetClass || 'entr'} / ${t.a.type} / ${t.a.trigger || 'onClick'}`]),
+        h('button', { class: 'btn', title: 'Remove animation', onclick: () => runAction(() => actions.removeAnimation(t.i)) }, ['✕'])
+      ])
+    );
+  }
+  const pick = { cls: 'entr', type: (ANIM_TYPES.entr[0] || {}).value, trigger: 'onClick' };
+  const typeWrap = h('div', {});
+  const renderTypes = () => {
+    typeWrap.innerHTML = '';
+    const opts: string[] = (ANIM_TYPES[pick.cls] || []).map((x: any) => x.value);
+    if (!opts.includes(pick.type)) pick.type = opts[0];
+    typeWrap.append(selectField('Type', opts, pick.type, (v) => (pick.type = v)));
+  };
+  renderTypes();
+  inspectorEl.append(
+    selectField('Class', ANIM_CLASSES.map((c: any) => c.value), pick.cls, (v) => {
+      pick.cls = v;
+      renderTypes();
+    })
+  );
+  inspectorEl.append(typeWrap);
+  inspectorEl.append(selectField('Trigger', ['onClick', 'withPrev', 'afterPrev'], pick.trigger, (v) => (pick.trigger = v)));
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      h('button', {
+        class: 'btn',
+        onclick: () =>
+          runAction(() =>
+            actions.addAnimation({
+              target: el.id,
+              type: pick.type,
+              presetClass: pick.cls,
+              duration: 500,
+              trigger: pick.trigger
+            })
+          )
+      }, ['+ Animation'])
     ])
   );
 }
