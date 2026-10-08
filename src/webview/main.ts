@@ -20,7 +20,8 @@ import {
   createStore,
   createActions,
   elementRect,
-  effectMargin
+  effectMargin,
+  FONT_LIST
 } from '@fefeding/ppt-parser';
 import {
   renderSlideInto,
@@ -1191,6 +1192,12 @@ function renderSlideInspector(slide: any) {
   );
 }
 
+/** The hyperlink shared by an element's runs ('' when none of them is linked). */
+function firstHref(el: any): string {
+  for (const p of el.paragraphs || []) for (const r of p.runs || []) if (r.href) return r.href;
+  return '';
+}
+
 // ---- Element-level properties ----
 function renderElementInspector(el: any) {
   inspectorEl.append(h('h4', {}, ['Element: ' + (el.type || 'unknown')]));
@@ -1221,20 +1228,98 @@ function renderElementInspector(el: any) {
     inspectorEl.append(checkField('Bold', !!el.bold, (v) => runAction(() => actions.applyTextStyleSel({ bold: v }))));
     inspectorEl.append(checkField('Italic', !!el.italic, (v) => runAction(() => actions.applyTextStyleSel({ italic: v }))));
     inspectorEl.append(checkField('Underline', !!el.underline, (v) => runAction(() => actions.applyTextStyleSel({ underline: v }))));
+    inspectorEl.append(selectField('Font', FONT_LIST, el.fontFace || FONT_LIST[0], (v) => update({ fontFace: v })));
+    inspectorEl.append(numField('Line Spacing', el.lineSpacing || 1.15, (v) => update({ lineSpacing: Math.max(0.5, v) })));
+    inspectorEl.append(checkField('Bullet', !!el.bullet, (v) => runAction(() => actions.applyTextStyleSel({ bullet: !!v }))));
+    // Hyperlinks live on runs, so writes are propagated to every run of the element
+    inspectorEl.append(
+      textField('Link', firstHref(el), (v) =>
+        runAction(() => {
+          const t = store.findElement(el.id);
+          if (!t) return;
+          const paras = (t.paragraphs || []).map((p: any) => ({
+            ...p,
+            runs: (p.runs || []).map((r: any) => ({ ...r, href: v || undefined }))
+          }));
+          actions.updateElement(el.id, { paragraphs: paras });
+        })
+      )
+    );
   } else if (el.type === 'shape') {
     inspectorEl.append(textField('Shape', el.shapeType || 'rect', (v) => update({ shapeType: v })));
-    const fillVal = typeof el.fill === 'string' ? el.fill : (el.fill && el.fill.color) || '#4285f4';
-    inspectorEl.append(colorField('Fill', fillVal, (v) => update({ fill: v })));
+    const fillObj: any = el.fill && typeof el.fill === 'object' ? el.fill : null;
+    const flatFill = fillObj ? fillObj.color || '#4285f4' : (typeof el.fill === 'string' && el.fill !== 'none' ? el.fill : '#4285f4');
+    inspectorEl.append(
+      selectField('Fill', ['solid', 'gradient', 'none'], fillObj?.type || 'solid', (v) => {
+        if (v === 'none') update({ fill: 'none' });
+        else if (v === 'gradient') update({ fill: { type: 'gradient', angle: 90, colors: [flatFill, '#ffffff'] } });
+        else update({ fill: flatFill });
+      })
+    );
+    if (!fillObj || fillObj.type !== 'none') {
+      inspectorEl.append(
+        colorField('Fill Color', flatFill, (v) => {
+          if (fillObj && fillObj.type === 'gradient') update({ fill: { ...fillObj, colors: [v, fillObj.colors?.[1] || '#ffffff'] } });
+          else update({ fill: v });
+        })
+      );
+      if (fillObj && fillObj.type === 'gradient') {
+        inspectorEl.append(
+          colorField('Fill Color 2', fillObj.colors?.[1] || '#ffffff', (v) =>
+            update({ fill: { ...fillObj, colors: [fillObj.colors?.[0] || flatFill, v] } })
+          )
+        );
+      }
+      inspectorEl.append(
+        numField('Fill Transparency %', fillObj?.transparency ?? 0, (v) =>
+          update({ fill: { ...(fillObj || { type: 'solid', color: flatFill }), transparency: clamp(v, 0, 100) } })
+        )
+      );
+    }
     const lineColor = el.line && el.line !== 'none' ? el.line.color || '#000' : '#000';
     const lineWidth = el.line && el.line !== 'none' ? el.line.width || 1 : 1;
     inspectorEl.append(colorField('Border Color', lineColor, (v) => update({ line: { color: v, width: lineWidth } })));
     inspectorEl.append(numField('Border Width', lineWidth, (v) => update({ line: v > 0 ? { color: lineColor, width: v } : 'none' })));
   } else if (el.type === 'image') {
+    const adj: any = el.imageAdjust || {};
     inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', onclick: pickImage }, ['Replace Image'])]));
-    inspectorEl.append(h('div', { class: 'empty' }, ['Select a local file to replace the image.']));
+    inspectorEl.append(numField('Brightness', adj.brightness ?? 0, (v) => update({ imageAdjust: { ...adj, brightness: clamp(v, -100, 100) } })));
+    inspectorEl.append(numField('Contrast', adj.contrast ?? 0, (v) => update({ imageAdjust: { ...adj, contrast: clamp(v, -100, 100) } })));
+    inspectorEl.append(numField('Transparency %', adj.transparency ?? 0, (v) => update({ imageAdjust: { ...adj, transparency: clamp(v, 0, 100) } })));
+  } else if (el.type === 'table') {
+    const rowCount = (el.rows || []).length;
+    const colCount = Math.max(1, ...(el.rows || []).map((r: any) => (r.cells || []).length));
+    inspectorEl.append(numField('Rows', rowCount, (v) => runAction(() => actions.resizeTable(el, Math.max(1, v), colCount))));
+    inspectorEl.append(numField('Columns', colCount, (v) => runAction(() => actions.resizeTable(el, rowCount, Math.max(1, v)))));
+    inspectorEl.append(checkField('Header Row', !!el.headerRow, (v) => update({ headerRow: v })));
+    inspectorEl.append(colorField('Border Color', el.border?.color || '#cfd8e3', (v) => update({ border: { ...(el.border || { width: 1 }), color: v } })));
+    inspectorEl.append(numField('Border Width', el.border?.width ?? 1, (v) => update({ border: { ...(el.border || { color: '#cfd8e3' }), width: v } })));
+    inspectorEl.append(colorField('Header Fill', el.headerFill || '#1A73E8', (v) => update({ headerFill: v })));
+    inspectorEl.append(colorField('Cell Fill', el.cellFill || '#ffffff', (v) => update({ cellFill: v })));
+    inspectorEl.append(numField('Font Size', el.fontSize || 16, (v) => update({ fontSize: v })));
+    inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', onclick: () => editTable(el.id) }, ['Edit Cells…'])]));
+  } else if (el.type === 'chart') {
+    inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', onclick: () => editChart(el.id) }, ['Edit Data…'])]));
+    inspectorEl.append(h('div', { class: 'empty' }, ['Edit series and categories, or double-click the chart.']));
+  } else if (el.type === 'video' || el.type === 'audio') {
+    inspectorEl.append(textField('Name', el.name || '', (v) => update({ name: v })));
   } else {
     inspectorEl.append(h('div', { class: 'empty' }, ['This type only supports move / resize / delete']));
   }
+
+  // Visual options shared by every element type
+  inspectorEl.append(h('h4', {}, ['Appearance']));
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      h('button', { class: 'btn', onclick: () => update({ flipH: !el.flipH }) }, [el.flipH ? 'Unflip H' : 'Flip H']),
+      h('button', { class: 'btn', onclick: () => update({ flipV: !el.flipV }) }, [el.flipV ? 'Unflip V' : 'Flip V'])
+    ])
+  );
+  inspectorEl.append(
+    checkField('Shadow', !!el.shadow, (v) =>
+      update({ shadow: v ? { type: 'outer', angle: 45, distance: 4, blur: 8, transparency: 60, color: '#000000' } : null })
+    )
+  );
 
   // Element actions
   inspectorEl.append(h('h4', {}, ['Element Actions']));
@@ -1256,6 +1341,22 @@ function renderElementInspector(el: any) {
       h('button', { class: 'btn', title: 'Align horizontal centre', onclick: () => runAction(() => actions.alignElements('hcenter')) }, ['Align C']),
       h('button', { class: 'btn', title: 'Align top edge to slide', onclick: () => runAction(() => actions.alignElements('top')) }, ['Align T']),
       h('button', { class: 'btn', title: 'Align vertical centre', onclick: () => runAction(() => actions.alignElements('vcenter')) }, ['Align M'])
+    ])
+  );
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      h('button', { class: 'btn', title: 'Align right edge', onclick: () => runAction(() => actions.alignElements('right')) }, ['Align R']),
+      h('button', { class: 'btn', title: 'Align bottom edge', onclick: () => runAction(() => actions.alignElements('bottom')) }, ['Align B']),
+      h('button', { class: 'btn', title: 'Distribute horizontally (needs 3+ selected)', onclick: () => runAction(() => actions.distribute('h')) }, ['Dist H']),
+      h('button', { class: 'btn', title: 'Distribute vertically (needs 3+ selected)', onclick: () => runAction(() => actions.distribute('v')) }, ['Dist V'])
+    ])
+  );
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.zOrder('forward')) }, ['Forward']),
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.zOrder('backward')) }, ['Backward']),
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.groupSelection()) }, ['Group']),
+      h('button', { class: 'btn', onclick: () => runAction(() => actions.ungroupSelection()) }, ['Ungroup'])
     ])
   );
   inspectorEl.append(
@@ -1307,9 +1408,15 @@ function selectSlide(i: number) {
 }
 
 // ---------- Element creation ----------
+/** New element id, matching the shape of the ids created while importing (`e_xxxx`). */
+function newId(): string {
+  return 'e_' + Math.random().toString(36).slice(2, 10);
+}
+
 function addTextElement() {
   runAction(() =>
     actions.addElement({
+      id: newId(),
       type: 'text',
       x: 120,
       y: 120,
@@ -1325,7 +1432,7 @@ function addTextElement() {
 }
 function addShapeElement(shapeType: string) {
   runAction(() =>
-    actions.addElement({ type: 'shape', shapeType, x: 200, y: 200, width: 200, height: 120, fill: '#4285f4', line: { color: '#000', width: 1 } })
+    actions.addElement({ id: newId(), type: 'shape', shapeType, x: 200, y: 200, width: 200, height: 120, fill: '#4285f4', line: { color: '#000', width: 1 } })
   );
 }
 function pickImage() {
@@ -1344,7 +1451,7 @@ function pickImage() {
         runAction(() =>
           replaceId
             ? actions.updateElement(replaceId, { data: dataUrl })
-            : actions.addElement({ type: 'image', data: dataUrl, x: 160, y: 160, width: w, height: hgt })
+            : actions.addElement({ id: newId(), type: 'image', data: dataUrl, x: 160, y: 160, width: w, height: hgt })
         );
       };
       img.src = dataUrl;
@@ -1364,6 +1471,7 @@ function insertTable() {
       runAction(() =>
         actions.addElement(
           {
+            id: newId(),
             type: 'table',
             x: 160,
             y: 160,
@@ -1387,6 +1495,7 @@ function insertChart() {
   runAction(() =>
     actions.addElement(
       {
+        id: newId(),
         type: 'chart',
         x: 160,
         y: 140,
@@ -1408,6 +1517,7 @@ function addMedia(type: 'video' | 'audio', data: string, ext: string) {
   runAction(() =>
     actions.addElement(
       {
+        id: newId(),
         type,
         data,
         extension: ext,
