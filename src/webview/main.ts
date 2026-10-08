@@ -226,6 +226,20 @@ function buildLayout() {
   root.append(main, statusbar, docInfoEl, presentEl, toastEl, ctxMenuEl);
 
   document.addEventListener('keydown', onKeyDown);
+
+  // Re-fit on viewport changes so the slide never overflows a small window (the default zoom is
+  // "fit to window", matching the parser's preview & editor). Presentation mode re-computes its
+  // own scale; otherwise only re-fit when the user hasn't picked a manual zoom.
+  window.addEventListener('resize', onWindowResize);
+}
+
+/** Window resize handler: re-fit the canvas, or recompute the presentation scale if presenting. */
+function onWindowResize(): void {
+  if (presentEl.classList.contains('on')) {
+    renderPresent();
+  } else if (state.userZoom == null) {
+    setZoom(null);
+  }
 }
 
 // ---------- Preview pipeline (pptxToHtml: most faithful rendering) ----------
@@ -261,6 +275,7 @@ async function renderPreview(): Promise<void> {
   if (state.mode === 'preview') {
     state.current = clamp(state.current, 0, state.preview.slides.length - 1);
     renderAll();
+    fitIfAuto();
   }
 }
 
@@ -275,7 +290,7 @@ async function enterEditMode(): Promise<void> {
   state.slideSize = doc.slideSize || state.slideSize;
   state.current = clamp(state.current, 0, store.slideCount - 1);
   renderAll();
-  setZoom(null);
+  fitIfAuto();
 }
 
 /** Serialize the edited document back to PPTX bytes. */
@@ -352,6 +367,15 @@ async function applyMode() {
 }
 
 // ---------- Zoom ----------
+/**
+ * Re-fit to the window only when the user hasn't set an explicit zoom. This keeps a manual zoom
+ * sticky across byte updates / mode switches / window resizes — the default zoom is "fit to
+ * window" (like the parser's preview & editor), not a fixed 100%.
+ */
+function fitIfAuto(): void {
+  if (state.userZoom == null) setZoom(null);
+}
+
 /** Fit the slide into the canvas area on both axes (capped at 2x). */
 function getFitZoom(): number {
   const sc = document.getElementById('canvasScroll');
