@@ -1,7 +1,6 @@
 .vscode/**
 .vscode-test/**
 src/**
-node_modules/**
 examples/**
 **/__tests__/**
 .gitignore
@@ -11,3 +10,4 @@ examples/**
 **/*.ts
 .esbuild.js
 .esbuild*
+esbuild.js

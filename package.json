@@ -12,7 +12,7 @@
     "Other"
   ],
   "main": "./dist/extension.js",
-  "icon": "",
+  "icon": "icon.png",
   "activationEvents": [
     "onCustomEditor:pptx-parser.pptxEditor"
   ],
@@ -59,7 +59,9 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "dev": "node esbuild.js --watch",
-    "install:parser": "npm install file:../pptx-parser"
+    "install:parser": "npm install file:../pptx-parser",
+    "package": "vsce package",
+    "publish": "vsce publish"
   },
   "dependencies": {
     "@fefeding/ppt-parser": "^1.0.19",
@@ -68,7 +70,8 @@
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
-    "@types/vscode": "^1.140.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.23.1",
     "typescript": "^5.9.3"
   }
