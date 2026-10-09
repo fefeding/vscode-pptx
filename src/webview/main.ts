@@ -27,7 +27,8 @@ import {
   SLIDE_SIZES,
   TRANSITIONS,
   ANIM_CLASSES,
-  ANIM_TYPES
+  ANIM_TYPES,
+  ANIM_DIRECTIONS
 } from '@fefeding/ppt-parser';
 import {
   renderSlideInto,
@@ -1128,9 +1129,56 @@ function renderInspector() {
   }
   inspectorEl.append(h('h4', {}, ['Elements (click to select)']), list);
 
-  const selected = store.sel.length === 1 ? store.findElement(store.sel[0]) : null;
-  if (!selected) renderSlideInspector(slide);
-  else renderElementInspector(selected);
+  if (store.sel.length > 1) {
+    const els = store.sel.map((id: string) => store.findElement(id)).filter(Boolean);
+    renderMultiInspector(els);
+  } else if (store.sel.length === 1) {
+    const sel = store.findElement(store.sel[0]);
+    if (sel) renderElementInspector(sel);
+    else renderSlideInspector(slide);
+  } else {
+    renderSlideInspector(slide);
+  }
+}
+
+// Multi-selection panel: arrange / order / group actions shared across the selection.
+function renderMultiInspector(els: any[]) {
+  inspectorEl.append(h('h4', {}, [els.length + ' elements selected']));
+  const btn = (label: string, title: string, fn: () => void) =>
+    h('button', { class: 'btn', title, onclick: () => runAction(fn) }, [label]);
+  inspectorEl.append(h('h4', {}, ['Arrange']));
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      btn('Align L', 'Align left edges', () => actions.alignElements('left')),
+      btn('Align C', 'Align horizontal centres', () => actions.alignElements('hcenter')),
+      btn('Align R', 'Align right edges', () => actions.alignElements('right')),
+      btn('Align T', 'Align tops', () => actions.alignElements('top')),
+      btn('Align M', 'Align vertical centres', () => actions.alignElements('vcenter')),
+      btn('Align B', 'Align bottoms', () => actions.alignElements('bottom'))
+    ])
+  );
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      btn('Dist H', 'Distribute horizontally (needs 3+)', () => actions.distribute('h')),
+      btn('Dist V', 'Distribute vertically (needs 3+)', () => actions.distribute('v'))
+    ])
+  );
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      btn('Front', 'Bring to front', () => actions.zOrder('front')),
+      btn('Forward', 'Bring forward', () => actions.zOrder('forward')),
+      btn('Backward', 'Send backward', () => actions.zOrder('backward')),
+      btn('Back', 'Send to back', () => actions.zOrder('back'))
+    ])
+  );
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      btn('Group', 'Group selected', () => actions.groupSelection()),
+      btn('Ungroup', 'Ungroup selected', () => actions.ungroupSelection()),
+      btn('Duplicate', 'Duplicate selected', () => actions.duplicateSelected()),
+      btn('Delete', 'Delete selected', () => actions.deleteSelected())
+    ])
+  );
 }
 
 function elSnippet(el: any): { name: string; type: string } {
@@ -1158,6 +1206,14 @@ function elSnippet(el: any): { name: string; type: string } {
   }
 }
 
+// Apply a new slide size both to the model and to the live canvas transform.
+function changeSlideSize(size: { width: number; height: number }) {
+  runAction(() => actions.setSlideSize(size));
+  state.slideSize = { width: size.width, height: size.height };
+  fitIfAuto();
+  renderAll();
+}
+
 // ---- Slide-level properties ----
 function renderSlideInspector(slide: any) {
   inspectorEl.append(h('h4', {}, ['Slide Properties']));
@@ -1175,17 +1231,46 @@ function renderSlideInspector(slide: any) {
       'Size',
       Object.keys(SLIDE_SIZES),
       store.doc.sizeKey || '16:9',
-      (v) => runAction(() => actions.setSlideSize(SLIDE_SIZES[v]))
+      (v) => changeSlideSize(SLIDE_SIZES[v])
     )
   );
+  const ss = state.slideSize;
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      numField('W', ss.width, (v) => changeSlideSize({ width: Math.round(v), height: ss.height })),
+      numField('H', ss.height, (v) => changeSlideSize({ width: ss.width, height: Math.round(v) }))
+    ])
+  );
+  const curTrans: any = slide?.transition || {};
   inspectorEl.append(
     selectField(
       'Transition',
       TRANSITIONS.map((t: any) => t.value),
-      slide?.transition?.type || 'none',
-      (v) => runAction(() => actions.setTransition({ type: v, duration: 800, advanceOnClick: true }))
+      curTrans.type || 'none',
+      (v) =>
+        runAction(() =>
+          actions.setTransition({ type: v, duration: curTrans.duration ?? 800, advanceOnClick: curTrans.advanceOnClick !== false })
+        )
     )
   );
+  if (curTrans.type && curTrans.type !== 'none') {
+    inspectorEl.append(
+      selectField(
+        'Trans. Speed',
+        [['1500', 'Slow'], ['800', 'Normal'], ['400', 'Fast']],
+        String(curTrans.duration ?? 800),
+        (v) =>
+          runAction(() =>
+            actions.setTransition({ type: curTrans.type, duration: Number(v), advanceOnClick: curTrans.advanceOnClick !== false })
+          )
+      )
+    );
+    const adv = h('input', { type: 'checkbox', ...(curTrans.advanceOnClick !== false ? { checked: 'checked' } : {}) });
+    adv.addEventListener('change', () =>
+      runAction(() => actions.setTransition({ type: curTrans.type, duration: curTrans.duration ?? 800, advanceOnClick: adv.checked }))
+    );
+    inspectorEl.append(h('div', { class: 'field' }, [h('label', {}, ['Click to advance']), adv]));
+  }
   inspectorEl.append(
     selectField(
       'Layout',
@@ -1202,12 +1287,17 @@ function renderSlideInspector(slide: any) {
     )
   );
 
+  const bgColor = slide?.background && typeof slide.background === 'string' ? slide.background : '#ffffff';
+  inspectorEl.append(colorField('Background', bgColor, (v) => runAction(() => actions.setBackground(v))));
   inspectorEl.append(
-    colorField(
-      'Background',
-      slide?.background && typeof slide.background === 'string' ? slide.background : '#ffffff',
-      (v) => runAction(() => actions.setBackground(v))
-    )
+    h('div', { class: 'row' }, [
+      h('button', { class: 'btn', title: 'Use an image as the slide background', onclick: pickBackgroundImage }, ['Image…']),
+      h('button', {
+        class: 'btn',
+        title: 'Apply a diagonal gradient background',
+        onclick: () => runAction(() => actions.setBackground({ type: 'gradient', angle: 45, colors: ['#1a73e8', '#ffffff'] }))
+      }, ['Gradient'])
+    ])
   );
 
   const hidden = h('input', { type: 'checkbox', ...(slide?.hidden ? { checked: 'checked' } : {}) });
@@ -1333,7 +1423,7 @@ function renderElementInspector(el: any) {
     inspectorEl.append(
       selectField('Fill', ['solid', 'gradient', 'none'], fillObj?.type || 'solid', (v) => {
         if (v === 'none') update({ fill: 'none' });
-        else if (v === 'gradient') update({ fill: { type: 'gradient', angle: 90, colors: [flatFill, '#ffffff'] } });
+        else if (v === 'gradient') update({ fill: { type: 'gradient', angle: fillObj?.angle ?? 90, colors: [flatFill, '#ffffff'] } });
         else update({ fill: flatFill });
       })
     );
@@ -1345,6 +1435,11 @@ function renderElementInspector(el: any) {
         })
       );
       if (fillObj && fillObj.type === 'gradient') {
+        inspectorEl.append(
+          selectField('Gradient', [['0', 'Horizontal'], ['90', 'Vertical'], ['45', 'Diagonal']], String(fillObj.angle ?? 90), (v) =>
+            update({ fill: { ...fillObj, angle: Number(v) } })
+          )
+        );
         inspectorEl.append(
           colorField('Fill Color 2', fillObj.colors?.[1] || '#ffffff', (v) =>
             update({ fill: { ...fillObj, colors: [fillObj.colors?.[0] || flatFill, v] } })
@@ -1378,8 +1473,24 @@ function renderElementInspector(el: any) {
     inspectorEl.append(colorField('Header Fill', el.headerFill || '#1A73E8', (v) => update({ headerFill: v })));
     inspectorEl.append(colorField('Cell Fill', el.cellFill || '#ffffff', (v) => update({ cellFill: v })));
     inspectorEl.append(numField('Font Size', el.fontSize || 16, (v) => update({ fontSize: v })));
+    const inset: any = el.inset || {};
+    inspectorEl.append(h('h4', {}, ['Cell Padding']));
+    inspectorEl.append(
+      h('div', { class: 'row' }, [
+        numField('L', inset.l ?? 6, (v) => update({ inset: { ...inset, l: v } })),
+        numField('R', inset.r ?? 6, (v) => update({ inset: { ...inset, r: v } }))
+      ])
+    );
+    inspectorEl.append(
+      h('div', { class: 'row' }, [
+        numField('T', inset.t ?? 4, (v) => update({ inset: { ...inset, t: v } })),
+        numField('B', inset.b ?? 4, (v) => update({ inset: { ...inset, b: v } }))
+      ])
+    );
     inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', onclick: () => editTable(el.id) }, ['Edit Cells…'])]));
   } else if (el.type === 'chart') {
+    inspectorEl.append(checkField('Legend', !!el.legend, (v) => update({ legend: v })));
+    inspectorEl.append(checkField('Data Labels', !!el.dataLabels, (v) => update({ dataLabels: v })));
     inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', onclick: () => editChart(el.id) }, ['Edit Data…'])]));
     inspectorEl.append(h('div', { class: 'empty' }, ['Edit series and categories, or double-click the chart.']));
   } else if (el.type === 'video' || el.type === 'audio') {
@@ -1460,7 +1571,7 @@ function renderElementInspector(el: any) {
       ])
     );
   }
-  const pick = { cls: 'entr', type: (ANIM_TYPES.entr[0] || {}).value, trigger: 'onClick' };
+  const pick = { cls: 'entr', type: (ANIM_TYPES.entr[0] || {}).value, trigger: 'onClick', direction: (ANIM_DIRECTIONS[0] || {}).value, duration: 500 };
   const typeWrap = h('div', {});
   const renderTypes = () => {
     typeWrap.innerHTML = '';
@@ -1477,6 +1588,8 @@ function renderElementInspector(el: any) {
   );
   inspectorEl.append(typeWrap);
   inspectorEl.append(selectField('Trigger', ['onClick', 'withPrev', 'afterPrev'], pick.trigger, (v) => (pick.trigger = v)));
+  inspectorEl.append(selectField('Direction', ANIM_DIRECTIONS.map((d: any) => [d.value, d.name]), pick.direction, (v) => (pick.direction = v)));
+  inspectorEl.append(numField('Duration (ms)', pick.duration, (v) => (pick.duration = Math.max(0, Math.round(v)))));
   inspectorEl.append(
     h('div', { class: 'row' }, [
       h('button', {
@@ -1487,7 +1600,8 @@ function renderElementInspector(el: any) {
               target: el.id,
               type: pick.type,
               presetClass: pick.cls,
-              duration: 500,
+              direction: pick.direction,
+              duration: pick.duration,
               trigger: pick.trigger
             })
           )
@@ -1513,9 +1627,13 @@ function numField(label: string, value: any, onInput: (v: number) => void) {
   input.addEventListener('change', () => onInput(num(input.value)));
   return h('div', { class: 'field' }, [h('label', {}, [label]), input]);
 }
-function selectField(label: string, options: string[], value: string, onInput: (v: string) => void) {
+function selectField(label: string, options: (string | [string, string])[], value: string, onInput: (v: string) => void) {
   const sel = h('select', {});
-  for (const o of options) sel.append(h('option', { value: o, ...(o === value ? { selected: 'selected' } : {}) }, [o]));
+  for (const o of options) {
+    const val = Array.isArray(o) ? o[0] : o;
+    const txt = Array.isArray(o) ? o[1] : o;
+    sel.append(h('option', { value: val, ...(val === value ? { selected: 'selected' } : {}) }, [txt]));
+  }
   sel.addEventListener('change', () => onInput(sel.value));
   return h('div', { class: 'field' }, [h('label', {}, [label]), sel]);
 }
@@ -1585,6 +1703,19 @@ function pickImage() {
       };
       img.src = dataUrl;
     };
+    reader.readAsDataURL(file);
+  });
+  document.body.append(input);
+  input.click();
+}
+
+function pickBackgroundImage() {
+  const input = h('input', { type: 'file', accept: 'image/*', style: 'display:none' });
+  input.addEventListener('change', () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => runAction(() => actions.setBackgroundImage(reader.result as string));
     reader.readAsDataURL(file);
   });
   document.body.append(input);
@@ -1824,6 +1955,11 @@ function onKeyDown(e: KeyboardEvent) {
     return;
   }
   if (typing) return;
+  if (e.key === 'F5') {
+    e.preventDefault();
+    startPresent();
+    return;
+  }
   if (presentEl.classList.contains('on')) {
     if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') presentNext();
     return;
