@@ -648,31 +648,25 @@ function buildOverlay() {
   if (!slide) return;
   for (const el of slide.elements || []) {
     if (el.hidden) continue;
+    if (!store.sel.includes(el.id)) continue; // only draw selection chrome for selected elements
     const r = elementRect(el);
     const m = effectMargin(el);
-    const selected = store.sel.includes(el.id);
     const rect = h('div', {
-      class: 'sel-rect' + (selected ? ' selected' : '') + (el.locked ? ' locked' : ''),
+      class: 'sel-rect selected' + (el.locked ? ' locked' : ''),
       'data-id': el.id,
       style:
         `left:${r.x - m.left}px;top:${r.y - m.top}px;` +
         `width:${r.width + m.left + m.right}px;height:${r.height + m.top + m.bottom}px;` +
         `transform:${el.rotation ? `rotate(${el.rotation}deg)` : ''}`
     });
-    if (!selected) {
-      rect.style.background = 'transparent';
-      rect.style.borderColor = 'rgba(66,133,244,.5)';
-      rect.style.pointerEvents = 'none';
-    } else {
-      rect.addEventListener('pointerdown', (e) => onRectPointerDown(e, el));
-      if (!el.locked) {
-        for (const d of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']) {
-          rect.append(h('div', { class: 'handle ' + d, 'data-dir': d }));
-        }
-        const rot = h('div', { class: 'handle rot', 'data-dir': 'rot', title: 'Rotate (hold Shift to snap 15°)' });
-        rot.style.top = '-24px';
-        rect.append(rot);
+    rect.addEventListener('pointerdown', (e) => onRectPointerDown(e, el));
+    if (!el.locked) {
+      for (const d of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']) {
+        rect.append(h('div', { class: 'handle ' + d, 'data-dir': d }));
       }
+      const rot = h('div', { class: 'handle rot', 'data-dir': 'rot', title: 'Rotate (hold Shift to snap 15°)' });
+      rot.style.top = '-24px';
+      rect.append(rot);
     }
     if (el.locked) rect.append(h('span', { class: 'lock-badge' }, ['🔒']));
     overlayEl.append(rect);
