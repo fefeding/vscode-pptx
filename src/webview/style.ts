@@ -228,6 +228,7 @@ body {
   background: transparent; color: inherit; cursor: pointer; font-size: 10px;
 }
 .shape-item:hover { border-color: var(--accent-2); background: rgba(66,133,244,.08); }
+.dlg-group-title { font-size: 11px; color: var(--muted); font-weight: 600; margin-top: 2px; }
 
 /* Right-side properties panel */
 .inspector { width: 280px; background: var(--panel); border-left: 1px solid var(--border); overflow-y: auto; padding: 10px; flex: 0 0 auto; }

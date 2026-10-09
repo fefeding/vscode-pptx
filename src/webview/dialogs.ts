@@ -264,21 +264,40 @@ export function openChartDialog(el: any, api: { update: (patch: any) => void }):
 }
 
 // ---------- shapes ----------
-export function openShapePicker(api: { addShape: (type: string) => void }): void {
+const SHAPE_GROUPS = [
+  { key: 'basic', label: '基本形状' },
+  { key: 'line', label: '线条与连接符' },
+  { key: 'arrow', label: '箭头连接符' },
+  { key: 'flowchart', label: '流程图' }
+];
+
+export function openShapePicker(api: { addShape: (type: string, opt?: any) => void }): void {
   openDialog('Insert shape', (close) => {
-    const wrap = h('div', { class: 'dlg-shapes' });
-    for (const s of SHAPES as any[]) {
-      const item = document.createElement('button');
-      item.className = 'shape-item';
-      item.title = s.name;
-      item.innerHTML = `<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="${s.d}" fill="currentColor"/></svg><span>${s.name}</span>`;
-      item.addEventListener('click', () => {
-        api.addShape(s.type);
-        close();
-      });
-      wrap.append(item);
+    const nodes: HTMLElement[] = [];
+    for (const g of SHAPE_GROUPS) {
+      const items = (SHAPES as any[]).filter((s) => s.group === g.key);
+      if (!items.length) continue;
+      nodes.push(h('div', { class: 'dlg-group-title' }, [g.label]));
+      const wrap = h('div', { class: 'dlg-shapes' });
+      for (const s of items) {
+        const item = document.createElement('button');
+        item.className = 'shape-item';
+        item.title = s.name;
+        // 线条/连接符类用描边而非填充，箭头才清晰可见
+        const isLine = s.stroke || (s.type && /connector/.test(s.type));
+        const svgInner = isLine
+          ? `<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="${s.d}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+          : `<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="${s.d}" fill="currentColor"/></svg>`;
+        item.innerHTML = `${svgInner}<span>${s.name}</span>`;
+        item.addEventListener('click', () => {
+          api.addShape(s.type, s.opt);
+          close();
+        });
+        wrap.append(item);
+      }
+      nodes.push(wrap);
     }
-    return [wrap];
+    return nodes;
   });
 }
 

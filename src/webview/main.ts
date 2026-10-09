@@ -189,7 +189,7 @@ function buildLayout() {
   const saveBtn = h('button', { class: 'btn edit-only', title: 'Save', onclick: flushAndSave }, ['Save']);
   // Top toolbar (full width) — mirrors the editor's insert / arrange toolbar
   const insText = h('button', { class: 'btn edit-only', title: 'Insert text box', onclick: addTextElement }, ['Text']);
-  const insShape = h('button', { class: 'btn edit-only', title: 'Insert shape', onclick: () => openShapePicker({ addShape: (t: string) => addShapeElement(t) }) }, ['Shape']);
+  const insShape = h('button', { class: 'btn edit-only', title: 'Insert shape', onclick: () => openShapePicker({ addShape: (t: string, opt?: any) => addShapeElement(t, opt) }) }, ['Shape']);
   const insImg = h('button', { class: 'btn edit-only', title: 'Insert image', onclick: pickImage }, ['Image']);
   const insTable = h('button', { class: 'btn edit-only', title: 'Insert table', onclick: insertTable }, ['Table']);
   const insChart = h('button', { class: 'btn edit-only', title: 'Insert chart', onclick: insertChart }, ['Chart']);
@@ -1786,9 +1786,15 @@ function addTextElement() {
     })
   );
 }
-function addShapeElement(shapeType: string) {
+function addShapeElement(shapeType: string, opt: any = {}) {
   runAction(() =>
-    actions.addElement({ id: newId(), type: 'shape', shapeType, x: 200, y: 200, width: 200, height: 120, fill: '#4285f4', line: { color: '#000', width: 1 } })
+    actions.addElement({
+      id: newId(), type: 'shape', shapeType,
+      x: 200, y: 200, width: 200, height: 120,
+      fill: opt.fill ?? '#4285f4',
+      line: opt.line ?? { color: '#000', width: 1 },
+      ...(opt.name ? { name: opt.name } : {})
+    })
   );
 }
 function pickImage() {

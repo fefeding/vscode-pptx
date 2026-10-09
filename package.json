@@ -68,7 +68,7 @@
     "publish": "vsce publish"
   },
   "dependencies": {
-    "@fefeding/ppt-parser": "^1.0.19",
+    "@fefeding/ppt-parser": "^1.0.20",
     "jszip": "^3.10.2",
     "tinycolor2": "^1.6.0"
   },
