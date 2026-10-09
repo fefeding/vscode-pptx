@@ -313,3 +313,52 @@ export function openMediaDialog(api: {
     ];
   });
 }
+
+// ---------- keyboard shortcuts help ----------
+export function openShortcuts(): void {
+  const groups: { title: string; rows: [string, string][] }[] = [
+    {
+      title: 'General',
+      rows: [
+        ['F5', 'Start presentation'],
+        ['Ctrl/Cmd + Z', 'Undo'],
+        ['Ctrl/Cmd + Y / Shift+Z', 'Redo'],
+        ['Ctrl/Cmd + A', 'Select all'],
+        ['Ctrl/Cmd + C / X / V', 'Copy / Cut / Paste'],
+        ['Esc', 'Cancel / deselect / exit group edit'],
+        ['?', 'This help']
+      ]
+    },
+    {
+      title: 'Selection & arrange',
+      rows: [
+        ['Click', 'Select element'],
+        ['Shift + Click', 'Add to selection'],
+        ['Drag', 'Move'],
+        ['Corner handles', 'Resize'],
+        ['Top handle', 'Rotate'],
+        ['Arrow keys', 'Nudge (Shift = ×10)'],
+        ['Double-click group', 'Enter group editing']
+      ]
+    },
+    {
+      title: 'Text',
+      rows: [
+        ['Double-click text', 'Edit inline'],
+        ['Ctrl/Cmd + B / I / U', 'Bold / Italic / Underline']
+      ]
+    }
+  ];
+  openDialog('Keyboard shortcuts', (close) => {
+    const wrap = h('div', { class: 'shortcuts' });
+    for (const g of groups) {
+      wrap.append(h('h4', {}, [g.title]));
+      const table = h('table', {});
+      for (const [k, d] of g.rows) {
+        table.append(h('tr', {}, [h('td', { class: 'key' }, [k]), h('td', {}, [d])]));
+      }
+      wrap.append(table);
+    }
+    return [wrap, h('div', { class: 'dlg-actions' }, [btn('Close', close, 'btn primary')])];
+  });
+}

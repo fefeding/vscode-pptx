@@ -28,7 +28,8 @@ import {
   TRANSITIONS,
   ANIM_CLASSES,
   ANIM_TYPES,
-  ANIM_DIRECTIONS
+  ANIM_DIRECTIONS,
+  CHART_TYPES
 } from '@fefeding/ppt-parser';
 import {
   renderSlideInto,
@@ -43,7 +44,8 @@ import {
   openTableDialog,
   openChartDialog,
   openShapePicker,
-  openMediaDialog
+  openMediaDialog,
+  openShortcuts
 } from './dialogs';
 // Same ECharts renderer the preview side uses (option building incl. 3D matches examples/index.html)
 import { chartRenderer } from '@fefeding/ppt-parser/chart-renderer';
@@ -58,10 +60,23 @@ const vscode = acquireVsCodeApi();
 
 const PARSE_OPTS = { mediaProcess: true, themeProcess: true } as const;
 
+// OOXML preset pattern fills (subset of the common names the renderer understands).
+const PATTERN_LIST: [string, string][] = [
+  ['pct5', '5%'], ['pct10', '10%'], ['pct20', '20%'], ['pct25', '25%'], ['pct30', '30%'],
+  ['pct40', '40%'], ['pct50', '50%'], ['pct60', '60%'], ['pct70', '70%'], ['pct75', '75%'],
+  ['pct80', '80%'], ['pct90', '90%'],
+  ['diagCross', 'Diagonal Cross'], ['divot', 'Divot'], ['dotGrid', 'Dot Grid'],
+  ['horizontal', 'Horizontal'], ['vertical', 'Vertical'], ['wave', 'Wave'],
+  ['zigzag', 'ZigZag'], ['plaid', 'Plaid'], ['shingle', 'Shingle'],
+  ['trellis', 'Trellis'], ['solidDmnd', 'Solid Diamond']
+];
+
 // ---------- Document state ----------
 // One editor store per webview (the parser core keeps the document, selection and history).
 const store: any = createStore();
 const actions: any = createActions(store);
+// Re-render whenever the group-edit context changes (enter/exit group editing).
+store.on('groupEdit', () => renderAll());
 
 const state: {
   mode: EditorMode;
@@ -114,8 +129,10 @@ let zoomLabelEl!: HTMLElement;
 let undoBtn!: HTMLButtonElement;
 let redoBtn!: HTMLButtonElement;
 let gridBtn!: HTMLElement;
+let snapBtn!: HTMLElement;
 let modeBtn!: HTMLElement;
 let presentEl!: HTMLElement;
+let groupHintEl!: HTMLElement;
 let presentHostEl!: HTMLElement;
 let docInfoEl!: HTMLElement;
 let toastEl!: HTMLElement;
@@ -177,13 +194,25 @@ function buildLayout() {
   const insTable = h('button', { class: 'btn edit-only', title: 'Insert table', onclick: insertTable }, ['⊞']);
   const insChart = h('button', { class: 'btn edit-only', title: 'Insert chart', onclick: insertChart }, ['◫']);
   const insMedia = h('button', { class: 'btn edit-only', title: 'Insert audio or video', onclick: () => openMediaDialog({ addMedia }) }, ['♪']);
+  const dupSlideBtn = h('button', { class: 'btn edit-only', title: 'Duplicate slide', onclick: () => runAction(() => actions.duplicateSlide(state.current)) }, ['⧉']);
+  const delSlideBtn = h('button', { class: 'btn edit-only', title: 'Delete slide', onclick: () => runAction(() => actions.deleteSlide(state.current)) }, ['🗑']);
+  const helpBtn = h('button', { class: 'btn', title: 'Keyboard shortcuts (?)', onclick: openShortcuts }, ['?']);
   const toolbar = h('div', { class: 'sp-toolbar' }, [
     newBtn, presentBtn, docBtn, modeBtn, saveBtn, undoBtn, redoBtn,
-    insText, insShape, insImg, insTable, insChart, insMedia
+    insText, insShape, insImg, insTable, insChart, insMedia,
+    dupSlideBtn, delSlideBtn, helpBtn
   ]);
 
   // Slide list
   slideListEl = h('div', { class: 'sp-list' });
+  slideListEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const thumb = (e.target as HTMLElement).closest('.thumb') as HTMLElement | null;
+    if (!thumb) return;
+    const idx = Array.prototype.indexOf.call(slideListEl.children, thumb);
+    if (idx < 0) return;
+    showSlideCtxMenu(e.clientX, e.clientY, idx);
+  });
   const spHead = h('div', { class: 'sp-head' }, [h('span', {}, ['Slides'])]);
   const slidesPanel = h('div', { class: 'slides-panel' }, [spHead, toolbar, slideListEl]);
 
@@ -208,8 +237,18 @@ function buildLayout() {
   slideHostEl.addEventListener('pointerdown', (e) => {
     if (state.mode !== 'edit') return;
     const node = (e.target as HTMLElement).closest('.el[data-id]') as HTMLElement | null;
+    const id = node?.dataset.id || null;
+    // Inside a group-edit session only elements belonging to the active group are selectable;
+    // clicking anywhere else leaves group editing (click again to act on the outer element).
+    if (store.groupEdit) {
+      const gid = store.groupEdit;
+      const belongs = id && (id === gid || findParentGroupId(id) === gid);
+      if (!belongs) {
+        store.setGroupEdit(null);
+        return;
+      }
+    }
     if (node) {
-      const id = node.dataset.id!;
       if (store.editingId === id) return; // let contenteditable place the caret itself
       // NOTE: do NOT call e.preventDefault() here — on Chromium it suppresses the synthetic
       // mouse/dblclick events, which would break double-click-to-edit. Dragging still prevents
@@ -229,6 +268,13 @@ function buildLayout() {
   });
   slideHostEl.addEventListener('dblclick', onCanvasDblClick);
   const canvasArea = h('div', { class: 'canvas-area' }, [scroll]);
+  groupHintEl = h('div', {
+    class: 'group-hint',
+    title: 'Double-click empty area or press Esc to exit',
+    onclick: () => store.setGroupEdit(null)
+  }, ['Group editing · Esc / double-click empty to exit']);
+  groupHintEl.style.display = 'none';
+  canvasArea.append(groupHintEl);
 
   // Properties panel (edit mode only)
   inspectorEl = h('div', { class: 'inspector edit-only' });
@@ -241,10 +287,13 @@ function buildLayout() {
   const zoomIn = h('span', { class: 'chip', title: 'Zoom in', onclick: () => setZoom(state.userZoom ?? state.zoom, true, 1.1) }, ['+']);
   const zoomFit = h('span', { class: 'chip', title: 'Fit to window', onclick: () => setZoom(null) }, ['Fit']);
   gridBtn = h('span', { class: 'chip edit-only', title: 'Grid', onclick: toggleGrid }, ['Grid']);
+  snapBtn = h('span', { class: 'chip edit-only', title: 'Snap to guides while dragging', onclick: toggleSnap }, ['Snap']);
+  if (store.snap !== false) snapBtn.style.background = 'var(--accent)';
   const statusbar = h('div', { class: 'statusbar' }, [
     statusCountEl,
     h('span', { class: 'spacer' }),
     gridBtn,
+    snapBtn,
     zoomOut,
     zoomFit,
     zoomLabelEl,
@@ -562,11 +611,34 @@ function renderCanvas() {
     if (!slide) return;
     renderSlideInto(slideHostEl, slide, store.doc, { grid: state.grid, editingId: store.editingId });
     buildOverlay();
+    applyGroupEditVisual();
   } else {
     slideHostEl.innerHTML = state.preview?.slides[state.current] || '';
     paintCharts(slideHostEl);
     overlayEl.innerHTML = '';
   }
+}
+
+function findParentGroupId(id: string): string | null {
+  for (const slide of store.doc.slides || []) {
+    for (const el of slide.elements || []) {
+      if (el.children && el.children.some((c: any) => c.id === id)) return el.id;
+    }
+  }
+  return null;
+}
+
+function applyGroupEditVisual() {
+  const gid = store.groupEdit;
+  slideHostEl.classList.toggle('group-editing', !!gid);
+  const groupNode = gid ? (slideHostEl.querySelector(`.el[data-id="${gid}"]`) as HTMLElement | null) : null;
+  slideHostEl.querySelectorAll('.el').forEach((n) => {
+    const node = n as HTMLElement;
+    const inside = groupNode ? groupNode.contains(node) : false;
+    node.classList.toggle('dimmed', !!gid && !inside);
+    node.classList.toggle('group-edit-active', !!gid && node === groupNode);
+  });
+  if (groupHintEl) groupHintEl.style.display = gid ? 'flex' : 'none';
 }
 
 // ---------- Selection overlay (geometry from the parser core) ----------
@@ -946,13 +1018,20 @@ function richBodyNode(id: string): HTMLElement | null {
   return slideHostEl.querySelector(`.el[data-id="${id}"] [contenteditable="true"]`) as HTMLElement | null;
 }
 
-/** Double click: enter rich-text editing, or hand over to the type's own affordance. */
+/** Double click: enter group editing, or enter rich-text editing, or hand over to the type's own affordance. */
 function onCanvasDblClick(e: MouseEvent) {
   if (state.mode !== 'edit') return;
   const node = (e.target as HTMLElement).closest('.el[data-id]') as HTMLElement | null;
-  if (!node) return;
+  if (!node) {
+    // Double-click on empty canvas exits group editing (if active).
+    if (store.groupEdit) store.setGroupEdit(null);
+    return;
+  }
   const el = store.findElement(node.dataset.id!);
   if (!el || el.locked) return;
+  // Double-clicking a group (or any element inside it) enters group editing.
+  const gid = el.children && el.children.length ? el.id : findParentGroupId(el.id);
+  if (gid && gid !== store.groupEdit) store.setGroupEdit(gid);
   store.setSel([el.id]);
   renderSelection();
   renderInspector();
@@ -1419,21 +1498,25 @@ function renderElementInspector(el: any) {
   } else if (el.type === 'shape') {
     inspectorEl.append(textField('Shape', el.shapeType || 'rect', (v) => update({ shapeType: v })));
     const fillObj: any = el.fill && typeof el.fill === 'object' ? el.fill : null;
-    const flatFill = fillObj ? fillObj.color || '#4285f4' : (typeof el.fill === 'string' && el.fill !== 'none' ? el.fill : '#4285f4');
+    const flatFill = fillObj && fillObj.color ? fillObj.color : (typeof el.fill === 'string' && el.fill !== 'none' ? el.fill : '#4285f4');
     inspectorEl.append(
-      selectField('Fill', ['solid', 'gradient', 'none'], fillObj?.type || 'solid', (v) => {
+      selectField('Fill', ['solid', 'gradient', 'image', 'pattern', 'none'], fillObj?.type || 'solid', (v) => {
         if (v === 'none') update({ fill: 'none' });
         else if (v === 'gradient') update({ fill: { type: 'gradient', angle: fillObj?.angle ?? 90, colors: [flatFill, '#ffffff'] } });
+        else if (v === 'image') update({ fill: { type: 'image', data: '', extension: 'png', tile: { sx: 1, sy: 1 }, srcRect: { l: 0, t: 0, r: 0, b: 0 } } });
+        else if (v === 'pattern') update({ fill: { type: 'pattern', prst: 'pct5', fg: '#000000', bg: '#ffffff' } });
         else update({ fill: flatFill });
       })
     );
     if (!fillObj || fillObj.type !== 'none') {
-      inspectorEl.append(
-        colorField('Fill Color', flatFill, (v) => {
-          if (fillObj && fillObj.type === 'gradient') update({ fill: { ...fillObj, colors: [v, fillObj.colors?.[1] || '#ffffff'] } });
-          else update({ fill: v });
-        })
-      );
+      if (!fillObj || (fillObj.type !== 'image' && fillObj.type !== 'pattern')) {
+        inspectorEl.append(
+          colorField('Fill Color', flatFill, (v) => {
+            if (fillObj && fillObj.type === 'gradient') update({ fill: { ...fillObj, colors: [v, fillObj.colors?.[1] || '#ffffff'] } });
+            else update({ fill: v });
+          })
+        );
+      }
       if (fillObj && fillObj.type === 'gradient') {
         inspectorEl.append(
           selectField('Gradient', [['0', 'Horizontal'], ['90', 'Vertical'], ['45', 'Diagonal']], String(fillObj.angle ?? 90), (v) =>
@@ -1446,11 +1529,30 @@ function renderElementInspector(el: any) {
           )
         );
       }
-      inspectorEl.append(
-        numField('Fill Transparency %', fillObj?.transparency ?? 0, (v) =>
-          update({ fill: { ...(fillObj || { type: 'solid', color: flatFill }), transparency: clamp(v, 0, 100) } })
-        )
-      );
+      if (fillObj && fillObj.type === 'image') {
+        inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', title: 'Choose an image to fill the shape', onclick: () => pickFillImage(el.id) }, ['Choose image…'])]));
+        const tile: any = fillObj.tile || { sx: 1, sy: 1 };
+        inspectorEl.append(numField('Tile X', tile.sx ?? 1, (v) => update({ fill: { ...fillObj, tile: { ...tile, sx: v } } })));
+        inspectorEl.append(numField('Tile Y', tile.sy ?? 1, (v) => update({ fill: { ...fillObj, tile: { ...tile, sy: v } } })));
+        const rc: any = fillObj.srcRect || { l: 0, t: 0, r: 0, b: 0 };
+        inspectorEl.append(h('h4', {}, ['Crop %']));
+        inspectorEl.append(numField('Left', rc.l ?? 0, (v) => update({ fill: { ...fillObj, srcRect: { ...rc, l: clamp(v, 0, 100) } } })));
+        inspectorEl.append(numField('Top', rc.t ?? 0, (v) => update({ fill: { ...fillObj, srcRect: { ...rc, t: clamp(v, 0, 100) } } })));
+        inspectorEl.append(numField('Right', rc.r ?? 0, (v) => update({ fill: { ...fillObj, srcRect: { ...rc, r: clamp(v, 0, 100) } } })));
+        inspectorEl.append(numField('Bottom', rc.b ?? 0, (v) => update({ fill: { ...fillObj, srcRect: { ...rc, b: clamp(v, 0, 100) } } })));
+      }
+      if (fillObj && fillObj.type === 'pattern') {
+        inspectorEl.append(selectField('Pattern', PATTERN_LIST, fillObj.prst || 'pct5', (v) => update({ fill: { ...fillObj, prst: v } })));
+        inspectorEl.append(colorField('Foreground', fillObj.fg || '#000000', (v) => update({ fill: { ...fillObj, fg: v } })));
+        inspectorEl.append(colorField('Background', fillObj.bg || '#ffffff', (v) => update({ fill: { ...fillObj, bg: v } })));
+      }
+      if (!fillObj || (fillObj.type !== 'image' && fillObj.type !== 'pattern')) {
+        inspectorEl.append(
+          numField('Fill Transparency %', fillObj?.transparency ?? 0, (v) =>
+            update({ fill: { ...(fillObj || { type: 'solid', color: flatFill }), transparency: clamp(v, 0, 100) } })
+          )
+        );
+      }
     }
     const lineColor = el.line && el.line !== 'none' ? el.line.color || '#000' : '#000';
     const lineWidth = el.line && el.line !== 'none' ? el.line.width || 1 : 1;
@@ -1489,12 +1591,19 @@ function renderElementInspector(el: any) {
     );
     inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', onclick: () => editTable(el.id) }, ['Edit Cells…'])]));
   } else if (el.type === 'chart') {
+    inspectorEl.append(selectField('Chart Type', (CHART_TYPES || []).map((t: any) => [t.value, t.name]), el.chartType || 'bar', (v) => update({ chartType: v })));
     inspectorEl.append(checkField('Legend', !!el.legend, (v) => update({ legend: v })));
     inspectorEl.append(checkField('Data Labels', !!el.dataLabels, (v) => update({ dataLabels: v })));
     inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', onclick: () => editChart(el.id) }, ['Edit Data…'])]));
     inspectorEl.append(h('div', { class: 'empty' }, ['Edit series and categories, or double-click the chart.']));
   } else if (el.type === 'video' || el.type === 'audio') {
     inspectorEl.append(textField('Name', el.name || '', (v) => update({ name: v })));
+    inspectorEl.append(
+      h('div', { class: 'row' }, [
+        h('button', { class: 'btn', title: 'Replace the media source', onclick: () => pickReplaceMedia(el.id) }, ['Replace Media…']),
+        h('button', { class: 'btn', title: 'Replace the poster image', onclick: () => pickPoster(el.id) }, ['Replace Poster…'])
+      ])
+    );
   } else {
     inspectorEl.append(h('div', { class: 'empty' }, ['This type only supports move / resize / delete']));
   }
@@ -1722,6 +1831,56 @@ function pickBackgroundImage() {
   input.click();
 }
 
+function pickReplaceMedia(id: string) {
+  const input = h('input', { type: 'file', accept: 'video/*,audio/*', style: 'display:none' });
+  input.addEventListener('change', () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const ext = (file.name.match(/\.(\w+)$/)?.[1] || '').toLowerCase();
+    const reader = new FileReader();
+    reader.onload = () => runAction(() => actions.updateElement(id, { data: reader.result as string, extension: ext, name: file.name }));
+    reader.readAsDataURL(file);
+  });
+  document.body.append(input);
+  input.click();
+}
+
+function pickPoster(id: string) {
+  const input = h('input', { type: 'file', accept: 'image/*', style: 'display:none' });
+  input.addEventListener('change', () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const ext = (file.name.match(/\.(\w+)$/)?.[1] || 'png').toLowerCase();
+    const reader = new FileReader();
+    reader.onload = () => runAction(() => actions.updateElement(id, { poster: { data: reader.result as string, extension: ext } }));
+    reader.readAsDataURL(file);
+  });
+  document.body.append(input);
+  input.click();
+}
+
+function pickFillImage(id: string) {
+  const input = h('input', { type: 'file', accept: 'image/*', style: 'display:none' });
+  input.addEventListener('change', () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const ext = (file.name.match(/\.(\w+)$/)?.[1] || 'png').toLowerCase();
+    const reader = new FileReader();
+    reader.onload = () => {
+      const elx = store.findElement(id);
+      const cur = elx && typeof elx.fill === 'object' && elx.fill.type === 'image' ? elx.fill : {};
+      runAction(() =>
+        actions.updateElement(id, {
+          fill: { ...cur, type: 'image', data: reader.result as string, extension: ext, tile: cur.tile || { sx: 1, sy: 1 }, srcRect: cur.srcRect || { l: 0, t: 0, r: 0, b: 0 } }
+        })
+      );
+    };
+    reader.readAsDataURL(file);
+  });
+  document.body.append(input);
+  input.click();
+}
+
 function insertTable() {
   openTableSizeDialog({
     create: (rows: number, cols: number) => {
@@ -1797,6 +1956,11 @@ function toggleGrid() {
   state.grid = !state.grid;
   gridEl.className = 'grid-overlay' + (state.grid ? ' on' : '');
   gridBtn.style.background = state.grid ? 'var(--accent)' : '';
+}
+
+function toggleSnap() {
+  store.setView({ snap: store.snap === false });
+  snapBtn.style.background = store.snap !== false ? 'var(--accent)' : '';
 }
 function toggleDocInfo() {
   const on = docInfoEl.classList.toggle('on');
@@ -1899,6 +2063,9 @@ function showCtxMenu(x: number, y: number) {
     items.push(
       { label: 'Bring Front', disabled: !hasSel, onClick: () => runAction(() => actions.zOrder('front')) },
       { label: 'Send Back', disabled: !hasSel, onClick: () => runAction(() => actions.zOrder('back')) },
+      { label: 'Copy', disabled: !hasSel, onClick: () => { actions.copySelected(false); toast('Copied'); } },
+      { label: 'Cut', disabled: !hasSel, onClick: () => { actions.copySelected(true); toast('Cut'); } },
+      { label: 'Paste', onClick: () => runAction(() => actions.paste()) },
       { label: 'Duplicate', disabled: !hasSel, onClick: () => runAction(() => actions.duplicateSelected()) },
       { label: 'Delete', disabled: !hasSel, onClick: () => runAction(() => actions.deleteSelected()) },
       { label: '', onClick: () => {} },
@@ -1914,7 +2081,26 @@ function showCtxMenu(x: number, y: number) {
       { label: 'Document Properties', onClick: () => toggleDocInfo() }
     );
   }
+  openCtxMenu(x, y, items);
+}
 
+function showSlideCtxMenu(x: number, y: number, idx: number) {
+  const count = slideCount();
+  const slide = store.doc.slides[idx];
+  const items: { label: string; disabled?: boolean; onClick?: () => void }[] = [
+    { label: 'New slide after', onClick: () => runAction(() => { const n = store.slideCount; actions.addSlide(); actions.moveSlide(n, idx + 1); }) },
+    { label: 'Duplicate slide', onClick: () => runAction(() => actions.duplicateSlide(idx)) },
+    { label: '', onClick: () => {} },
+    { label: 'Move up', disabled: idx <= 0, onClick: () => runAction(() => actions.moveSlide(idx, idx - 1)) },
+    { label: 'Move down', disabled: idx >= count - 1, onClick: () => runAction(() => actions.moveSlide(idx, idx + 1)) },
+    { label: slide?.hidden ? 'Show slide' : 'Hide slide', onClick: () => runAction(() => actions.toggleSlideHidden(idx)) },
+    { label: '', onClick: () => {} },
+    { label: 'Delete slide', disabled: count <= 1, onClick: () => runAction(() => actions.deleteSlide(idx)) }
+  ];
+  openCtxMenu(x, y, items);
+}
+
+function openCtxMenu(x: number, y: number, items: { label: string; disabled?: boolean; onClick?: () => void }[]) {
   ctxMenuEl.innerHTML = '';
   for (const it of items) {
     if (!it.label) {
@@ -1945,6 +2131,10 @@ function onKeyDown(e: KeyboardEvent) {
     if (presentEl.classList.contains('on')) {
       presentEl.className = 'present';
       disposeStaleCharts();
+      return;
+    }
+    if (store.groupEdit) {
+      store.setGroupEdit(null);
       return;
     }
     if (state.mode === 'edit' && store.sel.length) {

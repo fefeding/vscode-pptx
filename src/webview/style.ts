@@ -137,8 +137,11 @@ body {
   text-align: center; padding: 6px;
 }
 /* Group edit state: dim other top-level elements and outline the active group */
-.frame.group-editing .el.dimmed { opacity: 0.2; }
-.frame.group-editing .el-group.group-edit-active { outline: 2px dashed var(--accent-2); outline-offset: -2px; }
+.slide-host.group-editing .el.dimmed { opacity: 0.2; pointer-events: none; }
+.slide-host.group-editing .el.group-edit-active { outline: 2px dashed var(--accent-2); outline-offset: -2px; }
+.group-hint { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); z-index: 30;
+  background: var(--accent); color: #fff; padding: 4px 12px; border-radius: 14px; font-size: 12px;
+  cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
 .el[data-editing="1"] .tb-body { outline: 2px solid var(--accent-2); }
 
 /* Comment cards drawn on the canvas (matches the preview side's .pptx-comment styling) */
