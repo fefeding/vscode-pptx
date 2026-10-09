@@ -26,12 +26,13 @@ body {
 /* Hide editing controls in preview mode */
 .app.mode-preview .edit-only { display: none !important; }
 
-/* Slide panel toolbar (replaces the top bar) */
-.sp-toolbar {
-  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
-  padding: 6px 8px; background: var(--panel); border-bottom: 1px solid var(--border);
+/* Top toolbar (mirrors the editor's insert / arrange toolbar) */
+.sp-topbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border);
 }
-.sp-toolbar .btn { padding: 3px 8px; font-size: 12px; }
+.sp-topbar .btn { padding: 4px 10px; font-size: 12px; }
+.tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
 
 /* Context menu (right-click on canvas) */
 .ctx-menu {

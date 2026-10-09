@@ -187,20 +187,23 @@ function buildLayout() {
   undoBtn = h('button', { class: 'btn edit-only', title: 'Undo (Ctrl+Z)', onclick: () => runAction(() => store.undo()) }, ['Undo']);
   redoBtn = h('button', { class: 'btn edit-only', title: 'Redo (Ctrl+Y)', onclick: () => runAction(() => store.redo()) }, ['Redo']);
   const saveBtn = h('button', { class: 'btn edit-only', title: 'Save', onclick: flushAndSave }, ['Save']);
-  // Quick insert row (mirrors the editor's insert toolbar)
-  const insText = h('button', { class: 'btn edit-only', title: 'Insert text box', onclick: addTextElement }, ['T']);
-  const insShape = h('button', { class: 'btn edit-only', title: 'Insert shape', onclick: () => openShapePicker({ addShape: (t: string) => addShapeElement(t) }) }, ['▢']);
-  const insImg = h('button', { class: 'btn edit-only', title: 'Insert image', onclick: pickImage }, ['▣']);
-  const insTable = h('button', { class: 'btn edit-only', title: 'Insert table', onclick: insertTable }, ['⊞']);
-  const insChart = h('button', { class: 'btn edit-only', title: 'Insert chart', onclick: insertChart }, ['◫']);
-  const insMedia = h('button', { class: 'btn edit-only', title: 'Insert audio or video', onclick: () => openMediaDialog({ addMedia }) }, ['♪']);
-  const dupSlideBtn = h('button', { class: 'btn edit-only', title: 'Duplicate slide', onclick: () => runAction(() => actions.duplicateSlide(state.current)) }, ['⧉']);
-  const delSlideBtn = h('button', { class: 'btn edit-only', title: 'Delete slide', onclick: () => runAction(() => actions.deleteSlide(state.current)) }, ['🗑']);
+  // Top toolbar (full width) — mirrors the editor's insert / arrange toolbar
+  const insText = h('button', { class: 'btn edit-only', title: 'Insert text box', onclick: addTextElement }, ['Text']);
+  const insShape = h('button', { class: 'btn edit-only', title: 'Insert shape', onclick: () => openShapePicker({ addShape: (t: string) => addShapeElement(t) }) }, ['Shape']);
+  const insImg = h('button', { class: 'btn edit-only', title: 'Insert image', onclick: pickImage }, ['Image']);
+  const insTable = h('button', { class: 'btn edit-only', title: 'Insert table', onclick: insertTable }, ['Table']);
+  const insChart = h('button', { class: 'btn edit-only', title: 'Insert chart', onclick: insertChart }, ['Chart']);
+  const insMedia = h('button', { class: 'btn edit-only', title: 'Insert audio or video', onclick: () => openMediaDialog({ addMedia }) }, ['Media']);
+  const dupSlideBtn = h('button', { class: 'btn edit-only', title: 'Duplicate slide', onclick: () => runAction(() => actions.duplicateSlide(state.current)) }, ['Dup']);
+  const delSlideBtn = h('button', { class: 'btn edit-only', title: 'Delete slide', onclick: () => runAction(() => actions.deleteSlide(state.current)) }, ['Del']);
   const helpBtn = h('button', { class: 'btn', title: 'Keyboard shortcuts (?)', onclick: openShortcuts }, ['?']);
-  const toolbar = h('div', { class: 'sp-toolbar' }, [
-    newBtn, presentBtn, docBtn, modeBtn, saveBtn, undoBtn, redoBtn,
-    insText, insShape, insImg, insTable, insChart, insMedia,
-    dupSlideBtn, delSlideBtn, helpBtn
+  const sep = () => h('span', { class: 'tb-sep' });
+  const topbar = h('div', { class: 'sp-topbar' }, [
+    newBtn, presentBtn, docBtn, modeBtn, saveBtn,
+    sep(), undoBtn, redoBtn,
+    sep(), insText, insShape, insImg, insTable, insChart, insMedia,
+    sep(), dupSlideBtn, delSlideBtn,
+    sep(), helpBtn
   ]);
 
   // Slide list
@@ -213,8 +216,11 @@ function buildLayout() {
     if (idx < 0) return;
     showSlideCtxMenu(e.clientX, e.clientY, idx);
   });
-  const spHead = h('div', { class: 'sp-head' }, [h('span', {}, ['Slides'])]);
-  const slidesPanel = h('div', { class: 'slides-panel' }, [spHead, toolbar, slideListEl]);
+  const spHead = h('div', { class: 'sp-head' }, [
+    h('span', {}, ['Slides']),
+    h('button', { class: 'btn', title: 'New slide', onclick: () => runAction(() => actions.addSlide()) }, ['＋'])
+  ]);
+  const slidesPanel = h('div', { class: 'slides-panel' }, [spHead, slideListEl]);
 
   // Canvas: frame + overlay share one scaled coordinate space
   slideHostEl = h('div', { class: 'slide-host slide-frame' });
@@ -316,7 +322,7 @@ function buildLayout() {
   document.addEventListener('click', () => hideCtxMenu());
   window.addEventListener('scroll', () => hideCtxMenu(), true);
 
-  root.append(main, statusbar, docInfoEl, presentEl, toastEl, ctxMenuEl);
+  root.append(topbar, main, statusbar, docInfoEl, presentEl, toastEl, ctxMenuEl);
 
   document.addEventListener('keydown', onKeyDown);
 
