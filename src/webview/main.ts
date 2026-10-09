@@ -210,7 +210,9 @@ function buildLayout() {
     if (node) {
       const id = node.dataset.id!;
       if (store.editingId === id) return; // let contenteditable place the caret itself
-      e.preventDefault();
+      // NOTE: do NOT call e.preventDefault() here — on Chromium it suppresses the synthetic
+      // mouse/dblclick events, which would break double-click-to-edit. Dragging still prevents
+      // text selection via CSS (user-select:none) and startMove() guards selection on move.
       if (e.shiftKey) store.toggleSel(id);
       else if (!store.sel.includes(id)) store.setSel([id]);
       renderSelection();
@@ -818,7 +820,9 @@ function startMove(e: PointerEvent) {
     return el && !el.locked;
   });
   if (!ids.length) return;
-  e.preventDefault();
+  // Intentionally NOT preventing default on pointerdown: doing so on Chromium suppresses the
+  // synthetic dblclick event, breaking double-click-to-edit. We only prevent default once the
+  // gesture actually becomes a drag (below), which is after any click/dblclick has already fired.
   const startX = e.clientX;
   const startY = e.clientY;
   const orig = ids.map((id) => {
@@ -835,14 +839,22 @@ function startMove(e: PointerEvent) {
   const others = (store.slide?.elements || [])
     .filter((n: any) => n && !ids.includes(n.id) && !n.hidden)
     .map((n: any) => elementRect(n));
-  store.snapshot();
+  // Don't snapshot until the gesture becomes a real drag: a plain click would otherwise push a
+  // no-op undo entry on every selection.
   let moved = false;
+  let snapped = false;
 
   const onMove = (ev: PointerEvent) => {
     let dx = (ev.clientX - startX) / state.zoom;
     let dy = (ev.clientY - startY) / state.zoom;
     if (!moved && Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
     moved = true;
+    if (!snapped) {
+      store.snapshot();
+      snapped = true;
+    }
+    // Now that this is a real drag (not a click/dblclick), suppress text selection.
+    ev.preventDefault();
     let guides: any[] = [];
     if (store.snap !== false) {
       const s = snapBox(
@@ -943,12 +955,13 @@ function onCanvasDblClick(e: MouseEvent) {
   store.setSel([el.id]);
   renderSelection();
   renderInspector();
-  if (el.type === 'text') enterTextEditing(el);
+  // Any element that carries text can be edited inline (text boxes, shapes with text, group children…)
+  if (el.paragraphs && el.paragraphs.length) enterTextEditing(el);
   else if (el.type === 'image') pickImage();
   else if (el.type === 'table') editTable(el.id);
   else if (el.type === 'chart') editChart(el.id);
   else if (el.type === 'video' || el.type === 'audio') toast('Media cannot be played while editing');
-  else toast(`Double-click editing is not supported for ${el.type} yet`);
+  // other element types (line, connector, picture, shape without text) have no inline text
 }
 
 /** Open the table editor against the freshest model state. */
@@ -975,30 +988,34 @@ function enterTextEditing(el: any) {
   store.editingId = el.id;
   state.editingText = true;
   renderAll();
-  const body = richBodyNode(el.id);
-  if (!body) return;
-  body.focus();
-  const range = document.createRange();
-  range.selectNodeContents(body);
-  range.collapse(false);
-  const sel = window.getSelection();
-  sel?.removeAllRanges();
-  sel?.addRange(range);
-  let timer: any = null;
-  body.addEventListener('keydown', (ev: KeyboardEvent) => {
-    ev.stopPropagation(); // keep the global shortcut bus out of the rich-text session
-    if (ev.key === 'Escape') {
-      ev.preventDefault();
-      (ev.target as HTMLElement).blur();
-    }
-  });
-  body.addEventListener('blur', () => {
-    clearTimeout(timer);
-    commitEditing();
-  });
-  body.addEventListener('input', () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => commitEditing(true), 250);
+  // Defer focusing to the next frame: renderAll() rebuilds the DOM, and a synchronous focus()
+  // right after can be a no-op in the VS Code webview (layout not yet flushed).
+  requestAnimationFrame(() => {
+    const body = richBodyNode(el.id);
+    if (!body) return;
+    body.focus();
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    let timer: any = null;
+    body.addEventListener('keydown', (ev: KeyboardEvent) => {
+      ev.stopPropagation(); // keep the global shortcut bus out of the rich-text session
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        (ev.target as HTMLElement).blur();
+      }
+    });
+    body.addEventListener('blur', () => {
+      clearTimeout(timer);
+      commitEditing();
+    });
+    body.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => commitEditing(true), 250);
+    });
   });
 }
 

@@ -971,7 +971,7 @@ export function renderElement(el, ctx = {}) {
           if (el.fill && el.fill.type === 'image') applyShapeImageFill(bg, el);
         }
       }
-      node.appendChild(renderTextBody(el, ctx));
+      node.appendChild(renderTextBody(el, { ...ctx, editing: ctx.editingId != null ? ctx.editingId === el.id : !!ctx.editing }));
       break;
     }
     case 'shape': {
@@ -1870,7 +1870,7 @@ export function renderSlideInto(frame, slide, doc, opts = {}) {
   }
   for (const el of slide.elements || []) {
     if (el.hidden && !opts.showHidden) continue;
-    frame.appendChild(renderElement(el, { theme: doc.theme, editing: opts.editingId === el.id, chartScope: 'canvas' }));
+    frame.appendChild(renderElement(el, { theme: doc.theme, editingId: opts.editingId, chartScope: 'canvas' }));
   }
   // 批注卡片（仅画布层展示；pos 为 px，缺省锚右上区域）
   (slide.comments || []).forEach((c, i) => {

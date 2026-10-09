@@ -81,7 +81,9 @@ body {
 /* Outer size = scaled size (ensures correct scroll range and centering); inner is 1:1 layout then scaled as a whole */
 .stage { position: relative; background: #fff; box-shadow: 0 4px 20px rgba(0,0,0,.4); overflow: hidden; flex: 0 0 auto; margin: auto; }
 .stage-inner { position: absolute; top: 0; left: 0; transform-origin: top left; }
-.slide-host { position: absolute; top: 0; left: 0; }
+.slide-host { position: absolute; top: 0; left: 0; user-select: none; -webkit-user-select: none; }
+/* Inline-editing needs native text selection on the contenteditable body (parent disables it) */
+.tb-body[contenteditable="true"] { user-select: text; -webkit-user-select: text; }
 .slide-host .slide { margin: 0 !important; }
 .overlay { position: absolute; top: 0; left: 0; pointer-events: none; }
 .grid-overlay { position: absolute; inset: 0; pointer-events: none; display: none; }
