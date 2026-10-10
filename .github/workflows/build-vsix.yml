@@ -1,8 +1,9 @@
 name: Build and Release VSIX
 
 # Builds the .vsix on every push/PR to main (uploaded as a CI artifact). On version tags (v*)
-# it creates a GitHub Release with the .vsix attached and publishes the extension to the
-# VS Code Marketplace (requires the VSCODE_TOKEN repository secret).
+# it creates a GitHub Release with the .vsix attached and publishes the extension to both the
+# VS Code Marketplace (VSCODE_TOKEN) and the Open VSX Registry (OVSX_TOKEN). The two publish
+# steps are independent jobs, so a failure on one registry does not block the other.
 on:
   push:
     tags:
@@ -66,7 +67,7 @@ jobs:
   # Publish to the VS Code Marketplace on version tags. The repository secret VSCODE_TOKEN
   # (an Azure DevOps PAT with Marketplace > Manage, owned by the publisher in package.json)
   # is mapped to VSCE_PAT, which vsce reads.
-  publish:
+  publish-marketplace:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -83,7 +84,38 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Package VSIX
+        run: npx vsce package
+
       - name: Publish to VS Code Marketplace
-        run: ./node_modules/.bin/vsce publish -p "$VSCE_PAT"
+        run: ./node_modules/.bin/vsce publish --packagePath *.vsix -p "$VSCE_PAT"
         env:
           VSCE_PAT: ${{ secrets.VSCODE_TOKEN }}
+
+  # Publish to the Open VSX Registry on version tags. OVSX_TOKEN may be stored as a repository
+  # secret OR a repository variable; the expression falls back to the variable when the secret
+  # is empty. NOTE: repository variables are NOT masked in logs, so prefer a secret for tokens.
+  publish-ovsx:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Package VSIX
+        run: npx vsce package
+
+      - name: Publish to Open VSX
+        run: npx -y ovsx publish *.vsix -p "$OVSX_TOKEN"
+        env:
+          OVSX_TOKEN: ${{ secrets.OVSX_TOKEN || vars.OVSX_TOKEN }}
