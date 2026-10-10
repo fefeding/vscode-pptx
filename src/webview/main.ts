@@ -850,8 +850,8 @@ function startLineEndpointDrag(e: PointerEvent, which: 'start' | 'end', id: stri
   if (!el || el.locked) return;
   store.snapshot();
   const { a, b } = lineEndpoints(el);
-  const box = e.currentTarget as HTMLElement;
-  box.setPointerCapture(e.pointerId);
+  // 监听器挂在 window 上：renderAll() 每帧会重建 overlay 把手（销毁当前 box），
+  // 若绑在被重建的 box 上，指针捕获会丢失、拖拽在第一帧后失效。
   const onMove = (ev: PointerEvent) => {
     const p = clientToSlide(ev.clientX, ev.clientY);
     const glue = findGlueTarget(p, id, store.slide.elements, 14 / state.zoom);
@@ -864,18 +864,17 @@ function startLineEndpointDrag(e: PointerEvent, which: 'start' | 'end', id: stri
       if (glue) { if (which === 'start') t.begin = { shapeId: glue.shapeId, site: glue.site }; else t.end = { shapeId: glue.shapeId, site: glue.site }; }
       else { if (which === 'start') t.begin = null; else t.end = null; }
     }, { history: false });
-    renderAll();
+    renderCanvas();
   };
   const onUp = () => {
-    box.releasePointerCapture(e.pointerId);
-    box.removeEventListener('pointermove', onMove);
-    box.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
     state.version++;
     renderAll();
     syncSoon();
   };
-  box.addEventListener('pointermove', onMove);
-  box.addEventListener('pointerup', onUp);
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
 }
 
 /** 顶点 / 贝塞尔控制点拖拽（顶点编辑态） */
@@ -885,8 +884,7 @@ function startLineVertexDrag(e: PointerEvent, ds: { id: string; cmd: number; kin
   if (!el || el.locked) return;
   store.setVertexSel(ds.cmd, ds.kind);
   store.snapshot();
-  const box = e.currentTarget as HTMLElement;
-  box.setPointerCapture(e.pointerId);
+  // 同端点拖拽：监听器挂 window，避免渲染重建 overlay 时丢失指针捕获。
   const onMove = (ev: PointerEvent) => {
     const p = clientToSlide(ev.clientX, ev.clientY);
     store.update((doc: any) => {
@@ -899,18 +897,17 @@ function startLineVertexDrag(e: PointerEvent, ds: { id: string; cmd: number; kin
       else if (ds.kind === 'c1') { c.x1 = lx; c.y1 = ly; }
       else if (ds.kind === 'c2') { c.x2 = lx; c.y2 = ly; }
     }, { history: false });
-    renderAll();
+    renderCanvas();
   };
   const onUp = () => {
-    box.releasePointerCapture(e.pointerId);
-    box.removeEventListener('pointermove', onMove);
-    box.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
     state.version++;
     renderAll();
     syncSoon();
   };
-  box.addEventListener('pointermove', onMove);
-  box.addEventListener('pointerup', onUp);
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
 }
 
 // ---------- Canvas interaction: selection, marquee, smart guides, rich text ----------
