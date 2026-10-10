@@ -190,6 +190,13 @@ body {
   border-radius: 50%; background: #fff; border: 1.5px solid var(--accent-2);
   cursor: move; pointer-events: auto; box-sizing: border-box;
 }
+/* Hit-area expansion: keeps the visible dot unchanged while enlarging the clickable region.
+   Size is injected by JS as --hit (already divided by zoom → constant screen pixels). */
+.handle::after {
+  content: ''; position: absolute; left: 50%; top: 50%;
+  width: var(--hit, 20px); height: var(--hit, 20px);
+  transform: translate(-50%, -50%);
+}
 .lock-badge {
   position: absolute; top: -9px; left: -9px; font-size: 11px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 0 3px;

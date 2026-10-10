@@ -527,6 +527,8 @@ function setZoom(value: number | null, isUser = true, factor?: number) {
     state.zoom = z;
   }
   applyStageTransform();
+  // 把手尺寸按 zoom 归一（屏幕像素恒定），缩放后需重建 overlay 才能生效。
+  if (state.mode === 'edit') buildOverlay();
   zoomLabelEl.textContent = Math.round(state.zoom * 100) + '%';
 }
 function applyStageTransform() {
@@ -681,21 +683,22 @@ function buildOverlay() {
         `transform:${el.rotation ? `rotate(${el.rotation}deg)` : ''}`
     });
     rect.addEventListener('pointerdown', (e) => onRectPointerDown(e, el));
-    if (!el.locked) {
-      if (isLineElement(el)) {
-        // 线条：端点把手 + （顶点编辑态）顶点把手，不用 resize/rotate handle
-        drawLineHandles(el);
-      } else {
-        for (const d of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']) {
-          rect.append(h('div', { class: 'handle ' + d, 'data-dir': d }));
-        }
-        const rot = h('div', { class: 'handle rot', 'data-dir': 'rot', title: 'Rotate (hold Shift to snap 15°)' });
-        rot.style.top = '-24px';
-        rect.append(rot);
+    // 线条：端点/顶点把手，不用 resize/rotate handle
+    const isLine = isLineElement(el);
+    if (!el.locked && !isLine) {
+      // 命中区（--hit）除以 zoom，低缩放下也容易抓住；视觉尺寸仍由 CSS 固定。
+      const rk = 1 / (state.zoom || 1);
+      for (const d of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']) {
+        rect.append(h('div', { class: 'handle ' + d, 'data-dir': d, style: `--hit:${18 * rk}px` }));
       }
+      const rot = h('div', { class: 'handle rot', 'data-dir': 'rot', title: 'Rotate (hold Shift to snap 15°)', style: `--hit:${20 * rk}px` });
+      rot.style.top = '-24px';
+      rect.append(rot);
     }
     if (el.locked) rect.append(h('span', { class: 'lock-badge' }, ['🔒']));
     overlayEl.append(rect);
+    // 线条把手在 sel-rect 之后追加：确保端点位于选择框之上，命中区不被选择框遮挡。
+    if (!el.locked && isLine) drawLineHandles(el);
   }
 }
 
@@ -818,24 +821,27 @@ function clientToSlide(cx: number, cy: number) {
 /** 为线条绘制端点把手；顶点编辑态下额外绘制顶点 / 贝塞尔控制点把手 */
 function drawLineHandles(el: any) {
   const { a, b } = lineEndpoints(el);
-  const hs = 10;
+  // overlay 位于被 scale(zoom) 的 stage 内：把手尺寸除以 zoom，使可见圆点与命中区
+  // 在屏幕上保持恒定，低缩放下也容易点中。
+  const k = 1 / (state.zoom || 1);
+  const hs = 10 * k, hit = 24 * k;
   for (const [which, pt] of [['start', a], ['end', b]] as [string, any][]) {
     const handle = h('div', {
       class: 'handle endpoint',
-      style: `left:${pt.x}px;top:${pt.y}px;width:${hs}px;height:${hs}px;margin-left:${-hs / 2}px;margin-top:${-hs / 2}px;`
+      style: `left:${pt.x}px;top:${pt.y}px;width:${hs}px;height:${hs}px;margin-left:${-hs / 2}px;margin-top:${-hs / 2}px;--hit:${hit}px;`
     });
     handle.addEventListener('pointerdown', (e) => startLineEndpointDrag(e, which as 'start' | 'end', el.id));
     overlayEl.append(handle);
   }
   if (store.vertexEdit === el.id) {
     const pts = geomPoints(el);
-    const vhs = 9;
+    const vhs = 9 * k, vhit = 18 * k;
     for (const pt of pts) {
       const isSel = store.vertexSel && store.vertexSel.cmd === pt.cmdIndex && store.vertexSel.kind === pt.kind;
       const cls = (pt.kind === 'point' ? 'handle vertex' : 'handle vctrl') + (isSel ? ' sel' : '');
       const handle = h('div', {
         class: cls,
-        style: `left:${pt.abs.x}px;top:${pt.abs.y}px;width:${vhs}px;height:${vhs}px;margin-left:${-vhs / 2}px;margin-top:${-vhs / 2}px;`
+        style: `left:${pt.abs.x}px;top:${pt.abs.y}px;width:${vhs}px;height:${vhs}px;margin-left:${-vhs / 2}px;margin-top:${-vhs / 2}px;--hit:${vhit}px;`
       });
       handle.addEventListener('pointerdown', (e) => startLineVertexDrag(e, { id: el.id, cmd: pt.cmdIndex, kind: pt.kind }));
       overlayEl.append(handle);
