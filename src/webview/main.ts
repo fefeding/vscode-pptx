@@ -19,8 +19,6 @@ import {
   docToPptx,
   createStore,
   createActions,
-  elementRect,
-  effectMargin,
   FONT_LIST,
   THEMES,
   LAYOUTS,
@@ -31,6 +29,23 @@ import {
   ANIM_DIRECTIONS,
   CHART_TYPES
 } from '@fefeding/ppt-parser';
+
+// 几何 API：基础矩形类（elementRect/effectMargin）可由具名导出稳定获得，但线段/连接线相关函数
+// （isLineElement/lineEndpoints/geomPoints/connectionPoints/findGlueTarget/resyncGlue/setLineEndpoints）
+// 无法以具名重导出暴露（rollup 会修剪），统一从 createActions.geometryApi 聚合对象取用。
+// 该静态属性在 pptx-parser 模块加载时即被赋值，故此处可安全解构。
+const GEOM_API: any = (createActions as any).geometryApi || {};
+const {
+  elementRect,
+  effectMargin,
+  isLineElement,
+  lineEndpoints,
+  geomPoints,
+  connectionPoints,
+  findGlueTarget,
+  resyncGlue,
+  setLineEndpoints
+} = GEOM_API;
 import {
   renderSlideInto,
   renderThumbInto,
@@ -667,12 +682,17 @@ function buildOverlay() {
     });
     rect.addEventListener('pointerdown', (e) => onRectPointerDown(e, el));
     if (!el.locked) {
-      for (const d of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']) {
-        rect.append(h('div', { class: 'handle ' + d, 'data-dir': d }));
+      if (isLineElement(el)) {
+        // 线条：端点把手 + （顶点编辑态）顶点把手，不用 resize/rotate handle
+        drawLineHandles(el);
+      } else {
+        for (const d of ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']) {
+          rect.append(h('div', { class: 'handle ' + d, 'data-dir': d }));
+        }
+        const rot = h('div', { class: 'handle rot', 'data-dir': 'rot', title: 'Rotate (hold Shift to snap 15°)' });
+        rot.style.top = '-24px';
+        rect.append(rot);
       }
-      const rot = h('div', { class: 'handle rot', 'data-dir': 'rot', title: 'Rotate (hold Shift to snap 15°)' });
-      rot.style.top = '-24px';
-      rect.append(rot);
     }
     if (el.locked) rect.append(h('span', { class: 'lock-badge' }, ['🔒']));
     overlayEl.append(rect);
@@ -778,6 +798,111 @@ function onRectPointerDown(e: PointerEvent, el: any) {
 
   const onUp = (ev: PointerEvent) => {
     box.releasePointerCapture(ev.pointerId);
+    box.removeEventListener('pointermove', onMove);
+    box.removeEventListener('pointerup', onUp);
+    state.version++;
+    renderAll();
+    syncSoon();
+  };
+  box.addEventListener('pointermove', onMove);
+  box.addEventListener('pointerup', onUp);
+}
+
+// ---------- Line: endpoints / vertices / glue ----------
+/** 屏幕坐标 → 幻灯片坐标（overlay 与 slide 共享 state.zoom 缩放空间） */
+function clientToSlide(cx: number, cy: number) {
+  const rect = slideHostEl.getBoundingClientRect();
+  return { x: (cx - rect.left) / state.zoom, y: (cy - rect.top) / state.zoom };
+}
+
+/** 为线条绘制端点把手；顶点编辑态下额外绘制顶点 / 贝塞尔控制点把手 */
+function drawLineHandles(el: any) {
+  const { a, b } = lineEndpoints(el);
+  const hs = 10;
+  for (const [which, pt] of [['start', a], ['end', b]] as [string, any][]) {
+    const handle = h('div', {
+      class: 'handle endpoint',
+      style: `left:${pt.x}px;top:${pt.y}px;width:${hs}px;height:${hs}px;margin-left:${-hs / 2}px;margin-top:${-hs / 2}px;`
+    });
+    handle.addEventListener('pointerdown', (e) => startLineEndpointDrag(e, which as 'start' | 'end', el.id));
+    overlayEl.append(handle);
+  }
+  if (store.vertexEdit === el.id) {
+    const pts = geomPoints(el);
+    const vhs = 9;
+    for (const pt of pts) {
+      const isSel = store.vertexSel && store.vertexSel.cmd === pt.cmdIndex && store.vertexSel.kind === pt.kind;
+      const cls = (pt.kind === 'point' ? 'handle vertex' : 'handle vctrl') + (isSel ? ' sel' : '');
+      const handle = h('div', {
+        class: cls,
+        style: `left:${pt.abs.x}px;top:${pt.abs.y}px;width:${vhs}px;height:${vhs}px;margin-left:${-vhs / 2}px;margin-top:${-vhs / 2}px;`
+      });
+      handle.addEventListener('pointerdown', (e) => startLineVertexDrag(e, { id: el.id, cmd: pt.cmdIndex, kind: pt.kind }));
+      overlayEl.append(handle);
+    }
+  }
+}
+
+/** 端点拖拽：移动线条一端，靠近形状连接点时吸附成 glue */
+function startLineEndpointDrag(e: PointerEvent, which: 'start' | 'end', id: string) {
+  e.preventDefault(); e.stopPropagation();
+  const el = store.findElement(id);
+  if (!el || el.locked) return;
+  store.snapshot();
+  const { a, b } = lineEndpoints(el);
+  const box = e.currentTarget as HTMLElement;
+  box.setPointerCapture(e.pointerId);
+  const onMove = (ev: PointerEvent) => {
+    const p = clientToSlide(ev.clientX, ev.clientY);
+    const glue = findGlueTarget(p, id, store.slide.elements, 14 / state.zoom);
+    store.update((doc: any) => {
+      const t = findInDoc(doc, id); if (!t) return;
+      const ep = glue ? glue.point : p;
+      const na = which === 'start' ? ep : a;
+      const nb = which === 'start' ? b : ep;
+      setLineEndpoints(t, na, nb);
+      if (glue) { if (which === 'start') t.begin = { shapeId: glue.shapeId, site: glue.site }; else t.end = { shapeId: glue.shapeId, site: glue.site }; }
+      else { if (which === 'start') t.begin = null; else t.end = null; }
+    }, { history: false });
+    renderAll();
+  };
+  const onUp = () => {
+    box.releasePointerCapture(e.pointerId);
+    box.removeEventListener('pointermove', onMove);
+    box.removeEventListener('pointerup', onUp);
+    state.version++;
+    renderAll();
+    syncSoon();
+  };
+  box.addEventListener('pointermove', onMove);
+  box.addEventListener('pointerup', onUp);
+}
+
+/** 顶点 / 贝塞尔控制点拖拽（顶点编辑态） */
+function startLineVertexDrag(e: PointerEvent, ds: { id: string; cmd: number; kind: string }) {
+  e.preventDefault(); e.stopPropagation();
+  const el = store.findElement(ds.id);
+  if (!el || el.locked) return;
+  store.setVertexSel(ds.cmd, ds.kind);
+  store.snapshot();
+  const box = e.currentTarget as HTMLElement;
+  box.setPointerCapture(e.pointerId);
+  const onMove = (ev: PointerEvent) => {
+    const p = clientToSlide(ev.clientX, ev.clientY);
+    store.update((doc: any) => {
+      const t = findInDoc(doc, ds.id); if (!t || !t.custGeom) return;
+      const c = t.custGeom.paths[0].commands[ds.cmd]; if (!c) return;
+      const W = t.width || 100, H = t.height || 100, fx = t.flipH, fy = t.flipV;
+      const lx = Math.max(0, Math.min(W, fx ? W - (p.x - t.x) : (p.x - t.x)));
+      const ly = Math.max(0, Math.min(H, fy ? H - (p.y - t.y) : (p.y - t.y)));
+      if (ds.kind === 'point') { c.x = lx; c.y = ly; }
+      else if (ds.kind === 'c1') { c.x1 = lx; c.y1 = ly; }
+      else if (ds.kind === 'c2') { c.x2 = lx; c.y2 = ly; }
+    }, { history: false });
+    renderAll();
+  };
+  const onUp = () => {
+    box.releasePointerCapture(e.pointerId);
     box.removeEventListener('pointermove', onMove);
     box.removeEventListener('pointerup', onUp);
     state.version++;
@@ -912,6 +1037,16 @@ function startMove(e: PointerEvent) {
   const others = (store.slide?.elements || [])
     .filter((n: any) => n && !ids.includes(n.id) && !n.hidden)
     .map((n: any) => elementRect(n));
+  // 被移动的形状集合（不含线条与组合；组合移动时其 children 也视为被移动），供 glue 重算
+  const movedShapeIds = new Set<string>();
+  const allEls = ids.map((id: string) => store.findElement(id)).filter(Boolean);
+  for (const e of allEls) {
+    if (isLineElement(e) || e.type === 'group') continue;
+    movedShapeIds.add(e.id);
+  }
+  for (const e of allEls) {
+    if (e.type === 'group') (e.children || []).forEach((c: any) => movedShapeIds.add(c.id));
+  }
   // Don't snapshot until the gesture becomes a real drag: a plain click would otherwise push a
   // no-op undo entry on every selection.
   let moved = false;
@@ -952,6 +1087,7 @@ function startMove(e: PointerEvent) {
           }
         }
       }
+      if (movedShapeIds.size) resyncGlue(doc, store.slideIndex, [...movedShapeIds]);
     }, { history: false });
     syncElementNodes(ids);
     showGuides(guides);
@@ -1029,6 +1165,16 @@ function onCanvasDblClick(e: MouseEvent) {
   }
   const el = store.findElement(node.dataset.id!);
   if (!el || el.locked) return;
+  // 线条：双击进入顶点编辑；顶点编辑态下双击空白处插入一个顶点
+  if (isLineElement(el)) {
+    if (store.vertexEdit === el.id) {
+      actions.addVertexAt(el.id, clientToSlide(e.clientX, e.clientY));
+    } else {
+      actions.enterVertexEdit(el.id);
+    }
+    renderAll();
+    return;
+  }
   // Double-clicking a group (or any element inside it) enters group editing.
   const gid = el.children && el.children.length ? el.id : findParentGroupId(el.id);
   if (gid && gid !== store.groupEdit) store.setGroupEdit(gid);
@@ -2143,6 +2289,11 @@ function onKeyDown(e: KeyboardEvent) {
       store.setGroupEdit(null);
       return;
     }
+    if (store.vertexEdit) {
+      actions.exitVertexEdit();
+      renderAll();
+      return;
+    }
     if (state.mode === 'edit' && store.sel.length) {
       store.setSel([]);
       renderSelection();
@@ -2161,6 +2312,14 @@ function onKeyDown(e: KeyboardEvent) {
     return;
   }
   if (state.mode !== 'edit') return;
+  // 顶点编辑态：Delete/Backspace 删除当前选中顶点
+  if (store.vertexEdit && (e.key === 'Delete' || e.key === 'Backspace')) {
+    e.preventDefault();
+    actions.deleteSelectedVertex();
+    renderAll();
+    syncSoon();
+    return;
+  }
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.key.toLowerCase() === 'z') {
     e.preventDefault();

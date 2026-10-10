@@ -174,6 +174,22 @@ body {
   width: 10px; height: 10px; border-radius: 50%;
   background: var(--accent-2); border-color: #fff;
 }
+/* Line endpoint handles (drag to resize/move an endpoint, snap to shapes as glue) */
+.handle.endpoint {
+  border-radius: 50%; background: var(--accent-2); border: 2px solid #fff;
+  cursor: grab; pointer-events: auto; box-sizing: border-box;
+}
+.handle.endpoint:active { cursor: grabbing; }
+/* Vertex points / bezier control points while in vertex-edit mode */
+.handle.vertex {
+  background: #fff; border: 1.5px solid var(--accent-2);
+  cursor: move; pointer-events: auto; box-sizing: border-box;
+}
+.handle.vertex.sel { background: var(--accent-2); }
+.handle.vctrl {
+  border-radius: 50%; background: #fff; border: 1.5px solid var(--accent-2);
+  cursor: move; pointer-events: auto; box-sizing: border-box;
+}
 .lock-badge {
   position: absolute; top: -9px; left: -9px; font-size: 11px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 0 3px;
