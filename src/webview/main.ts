@@ -11,6 +11,10 @@
 // document and syncs the result, so the host can save without understanding the model.
 import { CSS } from './style';
 import { h, clamp } from './util';
+import { t, data, setLocale, kbd } from './i18n';
+import { openMenu, openMenuAt, popupKeydown, MenuItem } from './menu';
+import { createRibbon, RibbonState } from './ribbon';
+import { icon } from './icons';
 import {
   pptxToHtml,
   pptxToStandard,
@@ -60,7 +64,9 @@ import {
   openChartDialog,
   openShapePicker,
   openMediaDialog,
-  openShortcuts
+  openShortcuts,
+  openConfirm,
+  shapeMenuItems
 } from './dialogs';
 // Same ECharts renderer the preview side uses (option building incl. 3D matches examples/index.html)
 import { chartRenderer } from '@fefeding/ppt-parser/chart-renderer';
@@ -102,7 +108,9 @@ const state: {
   latest: Uint8Array | null;
   /** Preview render result (pptxToHtml output). */
   preview: { slides: string[]; charts: any[]; metadata?: any; customProps?: Record<string, string> } | null;
-  present: { slides: string[]; charts: any[]; version: number } | null;
+  present: { slides: string[]; charts: any[]; version: number; global?: string } | null;
+  /** True when the host document has unsaved changes (drives the title-bar dirty dot). */
+  dirty: boolean;
   /** Bumped whenever the serialized document changes, to invalidate cached renders. */
   version: number;
   slideSize: { width: number; height: number };
@@ -119,6 +127,7 @@ const state: {
   latest: null,
   preview: null,
   present: null,
+  dirty: false,
   version: 0,
   slideSize: { width: 1280, height: 720 },
   current: 0,
@@ -131,6 +140,8 @@ const state: {
 
 // ---------- DOM references ----------
 let root!: HTMLElement;
+let ribbonHost!: HTMLElement;
+let ribbon!: { root: HTMLElement; sync(s: RibbonState): void };
 let slideListEl!: HTMLElement;
 let stageEl!: HTMLElement;
 let stageInnerEl!: HTMLElement;
@@ -138,17 +149,17 @@ let slideHostEl!: HTMLElement;
 let overlayEl!: HTMLElement;
 let gridEl!: HTMLElement;
 let inspectorEl!: HTMLElement;
-let ctxMenuEl!: HTMLElement;
 let statusCountEl!: HTMLElement;
 let zoomLabelEl!: HTMLElement;
-let undoBtn!: HTMLButtonElement;
-let redoBtn!: HTMLButtonElement;
 let gridBtn!: HTMLElement;
 let snapBtn!: HTMLElement;
-let modeBtn!: HTMLElement;
 let presentEl!: HTMLElement;
+let presentCountEl!: HTMLElement;
 let groupHintEl!: HTMLElement;
 let presentHostEl!: HTMLElement;
+/** Element entrance animations on the current slide that advance on click (sequenced). */
+let presentClickAnims: { node: HTMLElement; kf: any; opts: KeyframeAnimationOptions; cls: string }[] = [];
+let presentClickIdx = 0;
 let docInfoEl!: HTMLElement;
 let toastEl!: HTMLElement;
 
@@ -190,36 +201,36 @@ function toBase64(bytes: Uint8Array): string {
 }
 
 // ---------- Layout ----------
+/**
+ * Nodes whose text is baked in at build time get an updater registered here, so a late locale
+ * change (the host's `init.locale` disagreeing with `<html lang>`) can refresh them in place
+ * instead of rebuilding the whole layout and duplicating its listeners.
+ */
+const localeUpdaters: (() => void)[] = [];
+function localize(fn: () => void): void {
+  localeUpdaters.push(fn);
+  fn();
+}
+
+/** Rebuild the ribbon (every label lives inside it) and refresh the static captions. */
+function applyLocale(): void {
+  for (const fn of localeUpdaters) fn();
+  const next = createRibbon({ cmd: ribbonCommands });
+  ribbonHost.replaceChild(next.root, ribbon.root);
+  ribbon = next;
+  ribbon.sync(ribbonState());
+}
+
 function buildLayout() {
   root = document.getElementById('app')!;
   root.className = 'app mode-preview';
 
-  // Slide panel toolbar
-  const newBtn = h('button', { class: 'btn', title: 'New slide', onclick: () => runAction(() => actions.addSlide()) }, ['+']);
-  const presentBtn = h('button', { class: 'btn', title: 'Present (F5)', onclick: startPresent }, ['Present']);
-  const docBtn = h('button', { class: 'btn', title: 'Document properties (metadata and custom properties)', onclick: toggleDocInfo }, ['Props']);
-  modeBtn = h('button', { class: 'btn', title: 'Switch to edit mode', onclick: toggleMode }, ['Edit']);
-  undoBtn = h('button', { class: 'btn edit-only', title: 'Undo (Ctrl+Z)', onclick: () => runAction(() => store.undo()) }, ['Undo']);
-  redoBtn = h('button', { class: 'btn edit-only', title: 'Redo (Ctrl+Y)', onclick: () => runAction(() => store.redo()) }, ['Redo']);
-  const saveBtn = h('button', { class: 'btn edit-only', title: 'Save', onclick: flushAndSave }, ['Save']);
-  // Top toolbar (full width) — mirrors the editor's insert / arrange toolbar
-  const insText = h('button', { class: 'btn edit-only', title: 'Insert text box', onclick: addTextElement }, ['Text']);
-  const insShape = h('button', { class: 'btn edit-only', title: 'Insert shape', onclick: () => openShapePicker({ addShape: (t: string, opt?: any) => addShapeElement(t, opt) }) }, ['Shape']);
-  const insImg = h('button', { class: 'btn edit-only', title: 'Insert image', onclick: pickImage }, ['Image']);
-  const insTable = h('button', { class: 'btn edit-only', title: 'Insert table', onclick: insertTable }, ['Table']);
-  const insChart = h('button', { class: 'btn edit-only', title: 'Insert chart', onclick: insertChart }, ['Chart']);
-  const insMedia = h('button', { class: 'btn edit-only', title: 'Insert audio or video', onclick: () => openMediaDialog({ addMedia }) }, ['Media']);
-  const dupSlideBtn = h('button', { class: 'btn edit-only', title: 'Duplicate slide', onclick: () => runAction(() => actions.duplicateSlide(state.current)) }, ['Dup']);
-  const delSlideBtn = h('button', { class: 'btn edit-only', title: 'Delete slide', onclick: () => runAction(() => actions.deleteSlide(state.current)) }, ['Del']);
-  const helpBtn = h('button', { class: 'btn', title: 'Keyboard shortcuts (?)', onclick: openShortcuts }, ['?']);
-  const sep = () => h('span', { class: 'tb-sep' });
-  const topbar = h('div', { class: 'sp-topbar' }, [
-    newBtn, presentBtn, docBtn, modeBtn, saveBtn,
-    sep(), undoBtn, redoBtn,
-    sep(), insText, insShape, insImg, insTable, insChart, insMedia,
-    sep(), dupSlideBtn, delSlideBtn,
-    sep(), helpBtn
-  ]);
+  // Ribbon (title bar + tabs + groups). Rebuilt wholesale when the language changes.
+  ribbonHost = h('div', { class: 'ribbon-host' });
+  ribbon = createRibbon({ cmd: ribbonCommands });
+  ribbonHost.append(ribbon.root);
+
+  const newSlide = () => runAction(() => actions.addSlide());
 
   // Slide list
   slideListEl = h('div', { class: 'sp-list' });
@@ -231,10 +242,13 @@ function buildLayout() {
     if (idx < 0) return;
     showSlideCtxMenu(e.clientX, e.clientY, idx);
   });
-  const spHead = h('div', { class: 'sp-head' }, [
-    h('span', {}, ['Slides']),
-    h('button', { class: 'btn', title: 'New slide', onclick: () => runAction(() => actions.addSlide()) }, ['＋'])
-  ]);
+  const spTitle = h('span', {}, [t('panel.slides')]);
+  const spNewBtn = h('button', { class: 'btn sp-new', type: 'button', onclick: newSlide }, [icon('newSlide', 14)]);
+  localize(() => {
+    spTitle.textContent = t('panel.slides');
+    spNewBtn.title = t('panel.newSlide');
+  });
+  const spHead = h('div', { class: 'sp-head' }, [spTitle, spNewBtn]);
   const slidesPanel = h('div', { class: 'slides-panel' }, [spHead, slideListEl]);
 
   // Canvas: frame + overlay share one scaled coordinate space
@@ -289,11 +303,11 @@ function buildLayout() {
   });
   slideHostEl.addEventListener('dblclick', onCanvasDblClick);
   const canvasArea = h('div', { class: 'canvas-area' }, [scroll]);
-  groupHintEl = h('div', {
-    class: 'group-hint',
-    title: 'Double-click empty area or press Esc to exit',
-    onclick: () => store.setGroupEdit(null)
-  }, ['Group editing · Esc / double-click empty to exit']);
+  groupHintEl = h('div', { class: 'group-hint', onclick: () => store.setGroupEdit(null) }, [t('group.hint')]);
+  localize(() => {
+    groupHintEl.title = t('group.exit');
+    groupHintEl.textContent = t('group.hint');
+  });
   groupHintEl.style.display = 'none';
   canvasArea.append(groupHintEl);
 
@@ -301,15 +315,24 @@ function buildLayout() {
   inspectorEl = h('div', { class: 'inspector edit-only' });
   const main = h('div', { class: 'main' }, [slidesPanel, canvasArea, inspectorEl]);
 
-  // Status bar
-  statusCountEl = h('span', {}, ['0 slides']);
-  zoomLabelEl = h('span', { class: 'chip', title: 'Click to reset to 100%', onclick: () => setZoom(1) }, ['100%']);
-  const zoomOut = h('span', { class: 'chip', title: 'Zoom out', onclick: () => setZoom(state.userZoom ?? state.zoom, true, 0.9) }, ['−']);
-  const zoomIn = h('span', { class: 'chip', title: 'Zoom in', onclick: () => setZoom(state.userZoom ?? state.zoom, true, 1.1) }, ['+']);
-  const zoomFit = h('span', { class: 'chip', title: 'Fit to window', onclick: () => setZoom(null) }, ['Fit']);
-  gridBtn = h('span', { class: 'chip edit-only', title: 'Grid', onclick: toggleGrid }, ['Grid']);
-  snapBtn = h('span', { class: 'chip edit-only', title: 'Snap to guides while dragging', onclick: toggleSnap }, ['Snap']);
-  if (store.snap !== false) snapBtn.style.background = 'var(--accent)';
+  // Status bar (PowerPoint keeps the slide counter and the zoom cluster down here)
+  statusCountEl = h('span', {});
+  zoomLabelEl = h('span', { class: 'chip', onclick: () => setZoom(1) }, ['100%']);
+  const zoomOut = h('span', { class: 'chip', onclick: () => setZoom(state.userZoom ?? state.zoom, true, 0.9) }, ['−']);
+  const zoomIn = h('span', { class: 'chip', onclick: () => setZoom(state.userZoom ?? state.zoom, true, 1.1) }, ['+']);
+  const zoomFit = h('span', { class: 'chip', onclick: () => setZoom(null) }, [t('status.fit')]);
+  gridBtn = h('span', { class: 'chip edit-only', onclick: toggleGrid }, [icon('grid', 13)]);
+  snapBtn = h('span', { class: 'chip edit-only', onclick: toggleSnap }, [icon('snap', 13)]);
+  localize(() => {
+    zoomLabelEl.title = t('status.zoomReset');
+    zoomOut.title = t('cmd.zoomOut');
+    zoomIn.title = t('cmd.zoomIn');
+    zoomFit.title = t('cmd.fit');
+    zoomFit.textContent = t('status.fit');
+    gridBtn.title = t('cmd.grid');
+    snapBtn.title = t('cmd.snap');
+  });
+  if (store.snap !== false) snapBtn.classList.add('on');
   const statusbar = h('div', { class: 'statusbar' }, [
     statusCountEl,
     h('span', { class: 'spacer' }),
@@ -321,23 +344,41 @@ function buildLayout() {
     zoomIn
   ]);
 
-  // Presentation layer
+  // Presentation layer: full-screen slide + a discreet overlay (counter / hint / exit)
   presentHostEl = h('div', { class: 'slide-host' });
-  presentEl = h('div', { class: 'present', onclick: presentNext }, [presentHostEl]);
+  presentCountEl = h('span', { class: 'present-count' });
+  const presentHint = h('span', { class: 'present-hint' }, [t('present.hint')]);
+  const presentExitBtn = h('button', {
+    class: 'btn present-exit',
+    type: 'button',
+    onclick: (e: MouseEvent) => {
+      e.stopPropagation();
+      stopPresent();
+    }
+  }, [icon('close', 12), h('span', {}, [t('present.exit')])]);
+  localize(() => {
+    presentHint.textContent = t('present.hint');
+    presentExitBtn.title = t('present.exit');
+    const span = presentExitBtn.querySelector('span:last-child');
+    if (span) span.textContent = t('present.exit');
+  });
+  const presentUi = h('div', { class: 'present-ui', onclick: (e: MouseEvent) => e.stopPropagation() }, [
+    presentCountEl,
+    presentHint,
+    presentExitBtn
+  ]);
+  presentEl = h('div', { class: 'present', onclick: presentClick }, [presentHostEl, presentUi]);
 
   docInfoEl = h('div', { class: 'doc-info' });
   toastEl = h('div', { class: 'toast' });
 
   // Right-click context menu (on canvas)
-  ctxMenuEl = h('div', { class: 'ctx-menu' });
   canvasArea.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     showCtxMenu(e.clientX, e.clientY);
   });
-  document.addEventListener('click', () => hideCtxMenu());
-  window.addEventListener('scroll', () => hideCtxMenu(), true);
 
-  root.append(topbar, main, statusbar, docInfoEl, presentEl, toastEl, ctxMenuEl);
+  root.append(ribbonHost, main, statusbar, docInfoEl, presentEl, toastEl);
 
   document.addEventListener('keydown', onKeyDown);
 
@@ -350,10 +391,311 @@ function buildLayout() {
 /** Window resize handler: re-fit the canvas, or recompute the presentation scale if presenting. */
 function onWindowResize(): void {
   if (presentEl.classList.contains('on')) {
-    renderPresent();
+    renderPresent(1, false);
   } else if (state.userZoom == null) {
     setZoom(null);
   }
+}
+
+// ---------- Ribbon bridge ----------
+/**
+ * Capability flags the ribbon buttons declare through `needs`. Keeping the decision here (and
+ * not inside the ribbon) means the rule "is this action available?" lives next to the model.
+ */
+function ribbonCaps(): Record<string, boolean | string> {
+  const editing = state.mode === 'edit';
+  const sel = editing ? store.selected() : [];
+  const one = sel.length === 1 ? sel[0] : null;
+  const texty = !!one && (one.type === 'text' || (one.paragraphs || []).length > 0);
+  const fill = one && one.fill ? (typeof one.fill === 'object' && one.fill.color ? one.fill.color : typeof one.fill === 'string' && one.fill !== 'none' ? one.fill : '') : '';
+  const line = one && one.line && one.line !== 'none' ? one.line.color || '#000000' : '#000000';
+  const bg = editing ? store.slide?.background : '';
+  return {
+    edit: editing,
+    preview: !editing,
+    canUndo: editing && store.canUndo(),
+    canRedo: editing && store.canRedo(),
+    selection: sel.length > 0,
+    single: sel.length === 1,
+    multi: sel.length > 1,
+    text: texty,
+    shape: sel.length > 0 && sel.every((el: any) => el.type === 'shape' || el.type === 'group'),
+    ungroupable: sel.some((el: any) => el.type === 'group'),
+    locked: sel.length > 0 && sel.every((el: any) => el.locked),
+    elementHidden: sel.length > 0 && sel.every((el: any) => el.hidden),
+    manySlides: editing && store.slideCount > 1,
+    notFirstSlide: state.current > 0,
+    notLastSlide: editing && state.current < store.slideCount - 1,
+    fitZoom: state.userZoom == null,
+    presenting: presentEl.classList.contains('on'),
+    // values shown by selects / colour swatches
+    fontFace: texty ? one.fontFace || '' : '',
+    fontSize: texty ? String(one.fontSize || '') : '',
+    textColor: texty ? one.color || '' : '',
+    bold: texty ? !!one.bold : false,
+    italic: texty ? !!one.italic : false,
+    underline: texty ? !!one.underline : false,
+    bullet: texty ? !!one.bullet : false,
+    align: texty ? one.align || 'left' : '',
+    valign: texty ? one.valign || 'top' : '',
+    lineSpacing: texty ? String(one.lineSpacing || '') : '',
+    fillColor: fill || '',
+    lineColor: line,
+    slideBg: typeof bg === 'string' ? bg : ''
+  };
+}
+
+function animLabel(a: any): string {
+  return [data('animClass', a.presetClass || 'entr', a.presetClass), data('animType', a.type || '', a.type), data('trigger', a.trigger || 'onClick', a.trigger)].join(' / ');
+}
+
+function ribbonState(): RibbonState {
+  // In preview mode the editor document isn't loaded (`store.doc === null`), so every store
+  // lookup has to go through the mode-aware `slideCount()` instead of `store.slideCount`.
+  const editing = state.mode === 'edit';
+  const trans: any = (editing && store.slide?.transition) || {};
+  const anims: any[] = editing && Array.isArray(store.slide?.animations) ? store.slide.animations : [];
+  const themeId = editing ? (typeof store.doc?.theme === 'string' ? store.doc.theme : 'blue') : '';
+  return {
+    mode: state.mode,
+    title: state.title,
+    dirty: state.dirty,
+    canUndo: editing && store.canUndo(),
+    canRedo: editing && store.canRedo(),
+    zoom: state.zoom,
+    grid: state.grid,
+    snap: store.snap !== false,
+    presenting: presentEl.classList.contains('on'),
+    slideCount: slideCount(),
+    slideIndex: state.current,
+    slideHidden: editing ? !!store.slide?.hidden : false,
+    theme: themeId,
+    sizeKey: editing ? store.doc?.sizeKey || '16:9' : '',
+    transition: { type: trans.type || 'none', duration: trans.duration ?? 800, advanceOnClick: trans.advanceOnClick !== false },
+    animations: anims.map((a, index) => ({ index, text: animLabel(a) })),
+    caps: ribbonCaps()
+  };
+}
+
+/** Commands the ribbon can invoke (see `ribbon-tabs.ts` for the call sites). */
+function ribbonCommands(name: string, ...args: any[]): any {
+  const edit = () => state.mode === 'edit';
+  const sel = () => store.selected();
+  const patch = (p: any) => {
+    const ids = store.selected().map((el: any) => el.id);
+    if (!ids.length) return;
+    runAction(() => {
+      for (const id of ids) actions.updateElement(id, p);
+    });
+  };
+  switch (name) {
+    // --- file / app ---
+    case 'undo': return runAction(() => store.undo());
+    case 'redo': return runAction(() => store.redo());
+    case 'setMode': return setMode(args[0]);
+    case 'shortcuts': return openShortcuts();
+    case 'docProps': return toggleDocInfo();
+    case 'present': return startPresent(false);
+    case 'presentHere': return startPresent(true);
+    case 'endShow': return stopPresent();
+    case 'toggleInspector': return inspectorEl.classList.toggle('hidden');
+    case 'zoom':
+      if (args[0] === 'in') return setZoom(state.userZoom ?? state.zoom, true, 1.1);
+      if (args[0] === 'out') return setZoom(state.userZoom ?? state.zoom, true, 0.9);
+      if (args[0] === 'actual') return setZoom(1);
+      return setZoom(null);
+
+    // --- clipboard / element ---
+    case 'paste': return runAction(() => actions.paste());
+    case 'copy': actions.copySelected(false); toast(t('toast.copied')); renderAll(); return;
+    case 'cut': actions.copySelected(true); toast(t('toast.cut')); renderAll(); return;
+    case 'duplicate': return runAction(() => actions.duplicateSelected());
+    case 'delete': return runAction(() => actions.deleteSelected());
+    case 'selectAll': actions.selectAll(); renderAll(); return;
+    case 'zOrder': return runAction(() => actions.zOrder(args[0]));
+    case 'align': return runAction(() => actions.alignElements(args[0]));
+    case 'distribute': return runAction(() => actions.distribute(args[0]));
+    case 'groupSel': return runAction(() => actions.groupSelection());
+    case 'ungroupSel': return runAction(() => actions.ungroupSelection());
+    case 'toggleLock': return runAction(() => actions.toggleLock());
+    case 'toggleHidden': return runAction(() => actions.toggleHidden());
+    case 'flip': {
+      const axis = args[0] === 'h' ? 'flipH' : 'flipV';
+      const on = !sel()[0]?.[axis];
+      return patch({ [axis]: on });
+    }
+
+    // --- text ---
+    case 'toggleBold': return runAction(() => actions.applyTextStyleSel({ bold: !sel()[0]?.bold }));
+    case 'toggleItalic': return runAction(() => actions.applyTextStyleSel({ italic: !sel()[0]?.italic }));
+    case 'toggleUnderline': return runAction(() => actions.applyTextStyleSel({ underline: !sel()[0]?.underline }));
+    case 'toggleBullet': return runAction(() => actions.applyTextStyleSel({ bullet: !sel()[0]?.bullet }));
+    case 'setAlign': return patch({ align: args[0] });
+    case 'setValign': return patch({ valign: args[0] });
+    case 'setLineSpacing': return patch({ lineSpacing: num(args[0], 1.15) });
+    case 'setFontFace': return patch({ fontFace: args[0] });
+    case 'setFontSize': return patch({ fontSize: num(args[0], 24) });
+    case 'setTextColor': return patch({ color: args[0] === 'none' ? undefined : args[0] });
+
+    // --- shape ---
+    case 'setFill': {
+      const v = args[0];
+      for (const el of sel()) {
+        const cur = el.fill && typeof el.fill === 'object' ? el.fill : null;
+        runAction(() =>
+          actions.updateElement(el.id, {
+            fill:
+              v === 'none'
+                ? 'none'
+                : cur && cur.type === 'gradient'
+                  ? { ...cur, colors: [v, cur.colors?.[1] || '#ffffff'] }
+                  : v
+          })
+        );
+      }
+      return;
+    }
+    case 'setLineColor': {
+      const v = args[0];
+      for (const el of sel()) {
+        const w = el.line && el.line !== 'none' ? el.line.width || 1 : 1;
+        runAction(() => actions.updateElement(el.id, { line: v === 'none' ? 'none' : { color: v, width: w } }));
+      }
+      return;
+    }
+    case 'shapes': return openShapePicker({ addShape: (t2: string, opt?: any) => addShapeElement(t2, opt) });
+    case 'shapesMenu': return shapeMenuItems({ addShape: (t2: string, opt?: any) => addShapeElement(t2, opt) });
+
+    // --- insert ---
+    case 'textBox': return addTextElement();
+    case 'picture': return pickImage();
+    case 'table': return insertTable();
+    case 'chart': return insertChart();
+    case 'media': return openMediaDialog({ addMedia });
+
+    // --- slides ---
+    case 'newSlide': return runAction(() => actions.addSlide(args[0]));
+    case 'duplicateSlide': return runAction(() => actions.duplicateSlide(state.current));
+    case 'deleteSlide': return deleteCurrentSlide();
+    case 'toggleSlideHidden': return runAction(() => actions.toggleSlideHidden(state.current));
+    case 'slideUp': return runAction(() => actions.moveSlide(state.current, state.current - 1));
+    case 'slideDown': return runAction(() => actions.moveSlide(state.current, state.current + 1));
+    case 'applyLayout': return applyLayoutWithConfirm(args[0]);
+    case 'openLayoutMenu': {
+      const anchor =
+        document.activeElement && ribbonHost.contains(document.activeElement as Node)
+          ? (document.activeElement as HTMLElement)
+          : (ribbonHost.querySelector('.rb-panel') as HTMLElement);
+      return openMenuAt(anchor, layoutMenuItems((id) => applyLayoutWithConfirm(id)), { minWidth: 180 });
+    }
+
+    // --- design ---
+    case 'setTheme': return runAction(() => actions.applyTheme(args[0], true));
+    case 'setSizeKey': {
+      const size = SLIDE_SIZES[args[0]];
+      if (size) changeSlideSize(size);
+      return;
+    }
+    case 'setSlideBg': return runAction(() => actions.setBackground(args[0] === 'none' ? '#ffffff' : args[0]));
+    case 'bgImage': return pickBackgroundImage();
+    case 'bgGradient': return runAction(() => actions.setBackground({ type: 'gradient', angle: 45, colors: ['#1a73e8', '#ffffff'] }));
+    case 'bgNone': return runAction(() => actions.setBackground('none'));
+
+    // --- transitions ---
+    case 'setTransition': return setTransition({ type: args[0] });
+    case 'setTransSpeed': return setTransition({ duration: num(args[0], 800) });
+    case 'setTransAdvance': return setTransition({ advanceOnClick: !!args[0] });
+    case 'applyTransitionAll': return applyTransitionToAll();
+
+    // --- animations ---
+    case 'addAnim': return addAnimationFromRibbon(args[0]);
+    case 'animMove': return runAction(() => actions.moveAnimation(args[0], args[1]));
+    case 'animRemove': return runAction(() => actions.removeAnimation(args[0]));
+
+    // --- view helpers ---
+    case 'grid': return toggleGrid();
+    case 'snap': return toggleSnap();
+    default:
+      if (!edit()) return;
+      return undefined;
+  }
+}
+
+// ---------- Helpers behind ribbon commands ----------
+function layoutMenuItems(run: (id: string) => void): MenuItem[] {
+  return [
+    { type: 'label', label: t('cmd.layout') },
+    ...LAYOUTS.map((l: any) => ({ label: data('layout', l.id, l.name), icon: 'layout', onClick: () => run(l.id) }))
+  ];
+}
+
+/** Applying a layout replaces every element of the slide, so confirm first. */
+async function applyLayoutWithConfirm(id?: string) {
+  if (state.mode !== 'edit') return;
+  const layoutId = id || (store.slide && store.slide.layout) || 'titleBody';
+  const ok = await openConfirm({ message: t('confirm.applyLayout'), okLabel: t('common.ok') });
+  if (!ok) return;
+  runAction(() => actions.applyLayout(layoutId));
+}
+
+async function deleteCurrentSlide() {
+  if (store.slideCount <= 1) {
+    toast(t('toast.needSelection'), 'warn');
+    return;
+  }
+  const ok = await openConfirm({
+    message: t('confirm.deleteSlide'),
+    detail: t('confirm.deleteSlideBody', state.current + 1),
+    okLabel: t('common.delete'),
+    danger: true
+  });
+  if (!ok) return;
+  runAction(() => actions.deleteSlide(state.current));
+}
+
+/** Patch the current slide's transition, keeping the fields the caller doesn't mention. */
+function setTransition(patch: any) {
+  const cur: any = store.slide?.transition || {};
+  runAction(() =>
+    actions.setTransition({
+      type: cur.type || 'none',
+      duration: cur.duration ?? 800,
+      advanceOnClick: cur.advanceOnClick !== false,
+      ...patch
+    })
+  );
+}
+
+function applyTransitionToAll() {
+  const cur: any = store.slide?.transition || {};
+  const next = { type: cur.type || 'none', duration: cur.duration ?? 800, advanceOnClick: cur.advanceOnClick !== false };
+  if (next.type === 'none') {
+    toast(t('toast.needSelection'), 'warn');
+    return;
+  }
+  runAction(() => {
+    store.update((doc: any) => {
+      for (const slide of doc.slides || []) slide.transition = { ...next };
+    });
+  });
+}
+
+function addAnimationFromRibbon(pick: any) {
+  const el = store.sel.length === 1 ? store.findElement(store.sel[0]) : null;
+  if (!el) {
+    toast(t('toast.needSelection'), 'warn');
+    return;
+  }
+  runAction(() =>
+    actions.addAnimation({
+      target: el.id,
+      type: pick.type,
+      presetClass: pick.cls,
+      direction: pick.direction,
+      duration: pick.duration,
+      trigger: pick.trigger
+    })
+  );
 }
 
 // ---------- Preview pipeline (pptxToHtml: most faithful rendering) ----------
@@ -397,9 +739,33 @@ async function renderPreview(): Promise<void> {
 async function enterEditMode(): Promise<void> {
   const bytes = state.latest;
   if (!bytes || !bytes.length) return;
+  // The pptx round-trip (pptxToStandard -> docFromPptx) corrupts slide animations: it rewrites the
+  // element-id `target` onto the wrong element and drops the `direction`/`trigger` fields, so every
+  // re-parse silently loses them. The live editor model in `store.doc` is authoritative in edit mode,
+  // so snapshot its animations and re-apply them after the (lossy) re-parse. Element ids are regenerated
+  // on every parse, so we key each animation by the *position* of its target element within the slide
+  // and re-map that position onto the freshly parsed slide's elements.
+  const animBackup = (store.doc?.slides || []).map((s: any) => {
+    if (!s.animations || !s.animations.length) return null;
+    return s.animations.map((a: any) => ({
+      anim: a,
+      pos: (s.elements || []).findIndex((e: any) => e.id === a.target)
+    }));
+  });
   const standard = await pptxToStandard(bytes, PARSE_OPTS);
   const doc = docFromPptx(standard, { fileName: state.title });
   store.setDoc(doc, { noHistory: true });
+  if (animBackup.length) {
+    doc.slides.forEach((s: any, i: number) => {
+      const b = animBackup[i];
+      if (!b || !b.length) return;
+      const els = s.elements || [];
+      s.animations = b.map(({ anim, pos }: any) => {
+        const el = pos >= 0 && pos < els.length ? els[pos] : els[0];
+        return { ...anim, target: el ? el.id : anim.target };
+      });
+    });
+  }
   store.setSlide(state.current);
   state.slideSize = doc.slideSize || state.slideSize;
   state.current = clamp(state.current, 0, store.slideCount - 1);
@@ -430,13 +796,15 @@ async function syncBytes(dirty: boolean): Promise<void> {
     if (!dirty) {
       // Undo landed back on the imported state: fall back to the original bytes
       state.latest = state.original;
+      state.dirty = false;
       post({ type: 'sync', bytes: null, dirty: false });
       return;
     }
     state.latest = await serializeDoc();
+    state.dirty = true;
     post({ type: 'sync', bytes: toBase64(state.latest), dirty: true });
   } catch (e: any) {
-    post({ type: 'error', message: 'Cannot serialize this document: ' + (e?.message || String(e)) });
+    post({ type: 'error', message: t('toast.serializeFailed', e?.message || String(e)) });
   } finally {
     state.syncing = false;
     if (syncQueued) {
@@ -446,14 +814,6 @@ async function syncBytes(dirty: boolean): Promise<void> {
   }
 }
 const syncSoon = debounce(() => syncBytes(store.canUndo()), 350);
-
-/** Flush the latest edits to the host, then ask it to write the file. */
-async function flushAndSave() {
-  if (state.mode !== 'edit') return;
-  if (store.editingId) commitEditing();
-  await syncBytes(store.canUndo());
-  post({ type: 'save' });
-}
 
 /** Run a store action and refresh everything that depends on the model. */
 function runAction(fn: () => void, opts: { skipSync?: boolean } = {}) {
@@ -471,17 +831,20 @@ function runAction(fn: () => void, opts: { skipSync?: boolean } = {}) {
 
 // ---------- Mode switching ----------
 async function toggleMode() {
-  const next: EditorMode = state.mode === 'preview' ? 'edit' : 'preview';
+  await setMode(state.mode === 'preview' ? 'edit' : 'preview');
+}
+
+/** Switch between preview and edit mode (no-op when already there). */
+async function setMode(next: EditorMode) {
+  if (next === state.mode) return;
   state.mode = next;
   post({ type: 'setMode', mode: next });
-  applyMode();
+  await applyMode();
 }
 
 async function applyMode() {
   root.className = 'app mode-' + state.mode;
   const editing = state.mode === 'edit';
-  modeBtn.textContent = editing ? 'Preview' : 'Edit';
-  modeBtn.title = editing ? 'Switch to preview mode' : 'Switch to edit mode';
   overlayEl.innerHTML = '';
 
   if (editing) {
@@ -494,7 +857,7 @@ async function applyMode() {
   try {
     await renderPreview();
   } catch (e: any) {
-    toast('Render failed: ' + (e?.message || String(e)), 'error');
+    toast(t('toast.renderFailed', e?.message || String(e)), 'error');
   }
 }
 
@@ -594,22 +957,35 @@ function renderAll() {
   renderSlideList();
   renderCanvas();
   renderInspector();
-  statusCountEl.textContent = `${slideCount()} slides`;
-  undoBtn.disabled = state.mode !== 'edit' || !store.canUndo();
-  redoBtn.disabled = state.mode !== 'edit' || !store.canRedo();
+  const count = slideCount();
+  statusCountEl.textContent = t('status.counter', state.current + 1, count);
+  statusCountEl.title = t('status.slides', count);
+  gridBtn.classList.toggle('on', state.grid);
+  snapBtn.classList.toggle('on', store.snap !== false);
   if (docInfoEl.classList.contains('on')) renderDocInfo();
+  ribbon.sync(ribbonState());
 }
 
 function slideCount(): number {
   return state.mode === 'edit' ? store.slideCount : state.preview?.slides.length || 0;
 }
 
+/**
+ * Slide panel. Thumbnails can be dragged to reorder (edit mode), show their number and a
+ * hidden-slide marker, and double-click jumps straight into edit mode from preview.
+ */
 function renderSlideList() {
   slideListEl.innerHTML = '';
   const count = slideCount();
+  const editing = state.mode === 'edit';
   for (let i = 0; i < count; i++) {
-    const thumb = h('div', { class: 'thumb' + (i === state.current ? ' active' : ''), onclick: () => selectSlide(i) });
-    if (state.mode === 'edit') {
+    const hidden = editing && !!store.doc.slides[i]?.hidden;
+    const thumb = h('div', {
+      class: 'thumb' + (i === state.current ? ' active' : '') + (hidden ? ' hidden-slide' : ''),
+      title: t('panel.slideThumb', i + 1) + (hidden ? ' · ' + t('panel.hiddenSlide') : ''),
+      draggable: 'false'
+    });
+    if (editing) {
       renderThumbInto(thumb, store.doc.slides[i], store.doc);
     } else {
       const htmls = state.preview?.slides || [];
@@ -623,8 +999,64 @@ function renderSlideList() {
       thumb.appendChild(inner);
     }
     thumb.append(h('span', { class: 'num' }, [String(i + 1)]));
+    if (hidden) thumb.append(h('span', { class: 'hide-badge', title: t('panel.hiddenSlide') }, ['🚫']));
+    thumb.addEventListener('click', () => {
+      if (dragMoved) return; // the gesture was a reorder, not a selection
+      selectSlide(i);
+    });
+    thumb.addEventListener('dblclick', () => {
+      if (state.mode !== 'edit' && store.doc.slides.length) toggleMode();
+    });
+    if (editing) enableThumbDrag(thumb, i);
     slideListEl.append(thumb);
   }
+}
+
+/** Drag a thumbnail to another position to reorder the slides. */
+let dragMoved = false;
+function enableThumbDrag(thumb: HTMLElement, index: number): void {
+  thumb.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || store.slideCount < 2) return;
+    const startY = e.clientY;
+    dragMoved = false;
+    let target = index;
+    const clearMarks = () =>
+      slideListEl.querySelectorAll('.thumb').forEach((n) => n.classList.remove('drop-before', 'drop-after', 'dragging'));
+    const onMove = (ev: PointerEvent) => {
+      if (!dragMoved && Math.abs(ev.clientY - startY) < 5) return;
+      dragMoved = true;
+      // Pick the insertion slot whose midpoint the pointer is closest to.
+      let best = index;
+      let bestDist = Infinity;
+      let after = false;
+      slideListEl.querySelectorAll<HTMLElement>('.thumb').forEach((n, i) => {
+        const r = n.getBoundingClientRect();
+        const mid = r.top + r.height / 2;
+        const d = Math.abs(ev.clientY - mid);
+        if (d < bestDist) {
+          bestDist = d;
+          best = i;
+          after = ev.clientY > mid;
+        }
+      });
+      target = best;
+      clearMarks();
+      thumb.classList.add('dragging');
+      slideListEl.children[best]?.classList.add(after ? 'drop-after' : 'drop-before');
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      clearMarks();
+      if (!dragMoved) return;
+      // `target` is a slot in the current list; convert it to a moveSlide destination.
+      // Removing the dragged slide first shifts everything after it up by one.
+      const to = target > index ? target - 1 : target;
+      if (to !== index && to >= 0 && to < store.slideCount - 1) runAction(() => actions.moveSlide(index, to));
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  });
 }
 
 function renderCanvas() {
@@ -1189,7 +1621,7 @@ function onCanvasDblClick(e: MouseEvent) {
   else if (el.type === 'image') pickImage();
   else if (el.type === 'table') editTable(el.id);
   else if (el.type === 'chart') editChart(el.id);
-  else if (el.type === 'video' || el.type === 'audio') toast('Media cannot be played while editing');
+  else if (el.type === 'video' || el.type === 'audio') toast(t('toast.mediaNotPlayable'));
   // other element types (line, connector, picture, shape without text) have no inline text
 }
 
@@ -1325,6 +1757,14 @@ function rgbToHex(css: string): string {
 }
 
 // ---------- Inspector ----------
+/**
+ * Selection changes call `renderSelection()` + `renderInspector()` (never `renderAll()`), so the
+ * ribbon is refreshed here — it lives in `renderInspector()` because both are always paired.
+ */
+function syncChrome(): void {
+  ribbon.sync(ribbonState());
+}
+
 function renderInspector() {
   if (state.mode !== 'edit') {
     inspectorEl.innerHTML = '';
@@ -1334,7 +1774,7 @@ function renderInspector() {
   inspectorEl.innerHTML = '';
   const slide = store.slide;
   const count = store.slideCount;
-  inspectorEl.append(h('h3', {}, ['Slide ' + (state.current + 1) + ' / ' + count]));
+  inspectorEl.append(h('h3', {}, [t('status.counter', state.current + 1, count)]));
 
   // Element list
   const list = h('ul', { class: 'el-list' });
@@ -1355,7 +1795,7 @@ function renderInspector() {
       )
     );
   }
-  inspectorEl.append(h('h4', {}, ['Elements (click to select)']), list);
+  inspectorEl.append(h('h4', {}, [t('insp.elements')]), list);
 
   if (store.sel.length > 1) {
     const els = store.sel.map((id: string) => store.findElement(id)).filter(Boolean);
@@ -1367,70 +1807,72 @@ function renderInspector() {
   } else {
     renderSlideInspector(slide);
   }
+  syncChrome();
 }
 
 // Multi-selection panel: arrange / order / group actions shared across the selection.
 function renderMultiInspector(els: any[]) {
-  inspectorEl.append(h('h4', {}, [els.length + ' elements selected']));
+  inspectorEl.append(h('h4', {}, [t('insp.selectedCount', els.length)]));
   const btn = (label: string, title: string, fn: () => void) =>
-    h('button', { class: 'btn', title, onclick: () => runAction(fn) }, [label]);
-  inspectorEl.append(h('h4', {}, ['Arrange']));
+    h('button', { class: 'btn', type: 'button', title, onclick: () => runAction(fn) }, [label]);
+  inspectorEl.append(h('h4', {}, [t('insp.arrange')]));
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      btn('Align L', 'Align left edges', () => actions.alignElements('left')),
-      btn('Align C', 'Align horizontal centres', () => actions.alignElements('hcenter')),
-      btn('Align R', 'Align right edges', () => actions.alignElements('right')),
-      btn('Align T', 'Align tops', () => actions.alignElements('top')),
-      btn('Align M', 'Align vertical centres', () => actions.alignElements('vcenter')),
-      btn('Align B', 'Align bottoms', () => actions.alignElements('bottom'))
+      btn(t('cmd.alignLeft'), t('cmd.alignLeft'), () => actions.alignElements('left')),
+      btn(t('cmd.alignCenter'), t('cmd.alignCenter'), () => actions.alignElements('hcenter')),
+      btn(t('cmd.alignRight'), t('cmd.alignRight'), () => actions.alignElements('right')),
+      btn(t('cmd.alignTop'), t('cmd.alignTop'), () => actions.alignElements('top')),
+      btn(t('cmd.alignMiddle'), t('cmd.alignMiddle'), () => actions.alignElements('vcenter')),
+      btn(t('cmd.alignBottom'), t('cmd.alignBottom'), () => actions.alignElements('bottom'))
     ])
   );
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      btn('Dist H', 'Distribute horizontally (needs 3+)', () => actions.distribute('h')),
-      btn('Dist V', 'Distribute vertically (needs 3+)', () => actions.distribute('v'))
+      btn(t('cmd.distH'), t('cmd.distH'), () => actions.distribute('h')),
+      btn(t('cmd.distV'), t('cmd.distV'), () => actions.distribute('v'))
     ])
   );
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      btn('Front', 'Bring to front', () => actions.zOrder('front')),
-      btn('Forward', 'Bring forward', () => actions.zOrder('forward')),
-      btn('Backward', 'Send backward', () => actions.zOrder('backward')),
-      btn('Back', 'Send to back', () => actions.zOrder('back'))
+      btn(t('cmd.bringFront'), t('cmd.bringFront'), () => actions.zOrder('front')),
+      btn(t('cmd.bringForward'), t('cmd.bringForward'), () => actions.zOrder('forward')),
+      btn(t('cmd.sendBackward'), t('cmd.sendBackward'), () => actions.zOrder('backward')),
+      btn(t('cmd.sendBack'), t('cmd.sendBack'), () => actions.zOrder('back'))
     ])
   );
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      btn('Group', 'Group selected', () => actions.groupSelection()),
-      btn('Ungroup', 'Ungroup selected', () => actions.ungroupSelection()),
-      btn('Duplicate', 'Duplicate selected', () => actions.duplicateSelected()),
-      btn('Delete', 'Delete selected', () => actions.deleteSelected())
+      btn(t('cmd.group'), t('cmd.group'), () => actions.groupSelection()),
+      btn(t('cmd.ungroup'), t('cmd.ungroup'), () => actions.ungroupSelection()),
+      btn(t('cmd.duplicate'), t('cmd.duplicate'), () => actions.duplicateSelected()),
+      btn(t('cmd.delete'), t('cmd.delete'), () => actions.deleteSelected())
     ])
   );
 }
 
 function elSnippet(el: any): { name: string; type: string } {
+  const label = (type: string) => t(`el.type.${type}`, type);
   switch (el.type) {
     case 'text':
-      return { name: (el.text || '').toString().split('\n')[0].slice(0, 24) || 'Text', type: 'Text' };
+      return { name: (el.text || '').toString().split('\n')[0].slice(0, 24) || t('el.type.text'), type: label('text') };
     case 'shape':
-      return { name: (el.shapeType || 'shape').toString(), type: 'Shape' };
+      return { name: (el.shapeType || 'shape').toString(), type: label('shape') };
     case 'image':
-      return { name: 'Image', type: 'Image' };
+      return { name: label('image'), type: label('image') };
     case 'chart':
-      return { name: (el.chartType || 'chart').toString(), type: 'Chart' };
+      return { name: (el.chartType || 'chart').toString(), type: label('chart') };
     case 'table':
-      return { name: 'Table', type: 'Table' };
+      return { name: label('table'), type: label('table') };
     case 'group':
-      return { name: 'Group', type: 'Group' };
+      return { name: label('group'), type: label('group') };
     case 'diagram':
-      return { name: 'Diagram', type: 'Diagram' };
+      return { name: label('diagram'), type: label('diagram') };
     case 'video':
-      return { name: 'Video', type: 'Video' };
+      return { name: label('video'), type: label('video') };
     case 'audio':
-      return { name: 'Audio', type: 'Audio' };
+      return { name: label('audio'), type: label('audio') };
     default:
-      return { name: (el.type || 'element').toString(), type: el.type || 'Element' };
+      return { name: (el.type || label('element')).toString(), type: el.type || label('element') };
   }
 }
 
@@ -1444,20 +1886,20 @@ function changeSlideSize(size: { width: number; height: number }) {
 
 // ---- Slide-level properties ----
 function renderSlideInspector(slide: any) {
-  inspectorEl.append(h('h4', {}, ['Slide Properties']));
+  inspectorEl.append(h('h4', {}, [t('insp.slideProps')]));
 
   inspectorEl.append(
     selectField(
-      'Theme',
-      THEMES.map((t: any) => t.id),
-      store.doc.theme || 'blue',
+      t('insp.theme'),
+      THEMES.map((x: any) => ({ value: x.id, label: data('theme', x.id, x.name) })),
+      typeof store.doc.theme === 'string' ? store.doc.theme : 'blue',
       (v) => runAction(() => actions.applyTheme(v, true))
     )
   );
   inspectorEl.append(
     selectField(
-      'Size',
-      Object.keys(SLIDE_SIZES),
+      t('insp.size'),
+      Object.keys(SLIDE_SIZES).map((k) => ({ value: k, label: data('size', k, k) })),
       store.doc.sizeKey || '16:9',
       (v) => changeSlideSize(SLIDE_SIZES[v])
     )
@@ -1465,66 +1907,56 @@ function renderSlideInspector(slide: any) {
   const ss = state.slideSize;
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      numField('W', ss.width, (v) => changeSlideSize({ width: Math.round(v), height: ss.height })),
-      numField('H', ss.height, (v) => changeSlideSize({ width: ss.width, height: Math.round(v) }))
+      numField(t('insp.width'), ss.width, (v) => changeSlideSize({ width: Math.round(v), height: ss.height })),
+      numField(t('insp.height'), ss.height, (v) => changeSlideSize({ width: ss.width, height: Math.round(v) }))
     ])
   );
   const curTrans: any = slide?.transition || {};
   inspectorEl.append(
     selectField(
-      'Transition',
-      TRANSITIONS.map((t: any) => t.value),
+      t('insp.transition'),
+      TRANSITIONS.map((x: any) => ({ value: x.value, label: data('transition', x.value, x.name) })),
       curTrans.type || 'none',
-      (v) =>
-        runAction(() =>
-          actions.setTransition({ type: v, duration: curTrans.duration ?? 800, advanceOnClick: curTrans.advanceOnClick !== false })
-        )
+      (v) => setTransition({ type: v })
     )
   );
   if (curTrans.type && curTrans.type !== 'none') {
     inspectorEl.append(
       selectField(
-        'Trans. Speed',
-        [['1500', 'Slow'], ['800', 'Normal'], ['400', 'Fast']],
+        t('insp.transSpeed'),
+        [
+          ['1500', data('speed', 'slow', 'Slow')],
+          ['800', data('speed', 'normal', 'Normal')],
+          ['400', data('speed', 'fast', 'Fast')]
+        ],
         String(curTrans.duration ?? 800),
-        (v) =>
-          runAction(() =>
-            actions.setTransition({ type: curTrans.type, duration: Number(v), advanceOnClick: curTrans.advanceOnClick !== false })
-          )
+        (v) => setTransition({ duration: Number(v) })
       )
     );
     const adv = h('input', { type: 'checkbox', ...(curTrans.advanceOnClick !== false ? { checked: 'checked' } : {}) });
-    adv.addEventListener('change', () =>
-      runAction(() => actions.setTransition({ type: curTrans.type, duration: curTrans.duration ?? 800, advanceOnClick: adv.checked }))
-    );
-    inspectorEl.append(h('div', { class: 'field' }, [h('label', {}, ['Click to advance']), adv]));
+    adv.addEventListener('change', () => setTransition({ advanceOnClick: adv.checked }));
+    inspectorEl.append(h('div', { class: 'field' }, [h('label', {}, [t('insp.clickToAdvance')]), adv]));
   }
   inspectorEl.append(
     selectField(
-      'Layout',
-      LAYOUTS.map((l: any) => l.id),
+      t('insp.layout'),
+      LAYOUTS.map((l: any) => ({ value: l.id, label: data('layout', l.id, l.name) })),
       slide?.layout || 'titleBody',
-      (v) => {
-        // Applying a layout rebuilds the slide, so it replaces the current elements
-        if (window.confirm('Applying a layout replaces every element on this slide. Continue?')) {
-          runAction(() => actions.applyLayout(v));
-        } else {
-          renderInspector();
-        }
-      }
+      (v) => void applyLayoutWithConfirm(v)
     )
   );
 
   const bgColor = slide?.background && typeof slide.background === 'string' ? slide.background : '#ffffff';
-  inspectorEl.append(colorField('Background', bgColor, (v) => runAction(() => actions.setBackground(v))));
+  inspectorEl.append(colorField(t('insp.background'), bgColor, (v) => runAction(() => actions.setBackground(v))));
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      h('button', { class: 'btn', title: 'Use an image as the slide background', onclick: pickBackgroundImage }, ['Image…']),
+      h('button', { class: 'btn', type: 'button', title: t('insp.backgroundImage'), onclick: pickBackgroundImage }, [t('insp.backgroundImage')]),
       h('button', {
         class: 'btn',
-        title: 'Apply a diagonal gradient background',
+        type: 'button',
+        title: t('insp.backgroundGradient'),
         onclick: () => runAction(() => actions.setBackground({ type: 'gradient', angle: 45, colors: ['#1a73e8', '#ffffff'] }))
-      }, ['Gradient'])
+      }, [t('insp.backgroundGradient')])
     ])
   );
 
@@ -1534,59 +1966,53 @@ function renderSlideInspector(slide: any) {
       doc.slides[store.slideIndex].hidden = hidden.checked;
     }))
   );
-  inspectorEl.append(h('div', { class: 'field' }, [h('label', {}, ['Hidden']), hidden]));
+  inspectorEl.append(h('div', { class: 'field' }, [h('label', {}, [t('insp.hidden')]), hidden]));
 
-  const notes = h('textarea', { placeholder: 'Speaker notes...' }, [slide?.notes || '']);
+  const notes = h('textarea', { placeholder: t('insp.notesPlaceholder') }, [slide?.notes || '']);
   notes.addEventListener('focus', () => (state.editingText = true));
   notes.addEventListener('blur', () => (state.editingText = false));
   notes.addEventListener(
     'input',
     debounce(() => runAction(() => actions.setNotes(notes.value), { skipSync: true }), 400)
   );
-  inspectorEl.append(h('div', { class: 'field', style: 'align-items:flex-start' }, [h('label', {}, ['Notes']), notes]));
+  inspectorEl.append(h('div', { class: 'field', style: 'align-items:flex-start' }, [h('label', {}, [t('insp.notes')]), notes]));
 
   // ---- Animations on this slide ----
-  inspectorEl.append(h('h4', {}, ['Animations']));
+  inspectorEl.append(h('h4', {}, [t('insp.animations')]));
   const anims: any[] = Array.isArray(slide?.animations) ? slide.animations : [];
-  if (!anims.length) inspectorEl.append(h('div', { class: 'empty' }, ['No animations on this slide']));
+  if (!anims.length) inspectorEl.append(h('div', { class: 'empty' }, [t('insp.noAnimations')]));
   for (let i = 0; i < anims.length; i++) {
-    const a = anims[i];
     inspectorEl.append(
       h('div', { class: 'row' }, [
-        h('span', { style: 'flex:1;font-size:11px' }, [`${a.presetClass || 'entr'} / ${a.type || '?'} / ${a.trigger || 'onClick'}`]),
-        h('button', { class: 'btn', title: 'Move up', onclick: () => runAction(() => actions.moveAnimation(i, -1)) }, ['↑']),
-        h('button', { class: 'btn', title: 'Move down', onclick: () => runAction(() => actions.moveAnimation(i, 1)) }, ['↓']),
-        h('button', { class: 'btn', title: 'Remove', onclick: () => runAction(() => actions.removeAnimation(i)) }, ['✕'])
+        h('span', { style: 'flex:1;font-size:11px' }, [animLabel(anims[i])]),
+        h('button', { class: 'btn', type: 'button', title: t('insp.animMoveUp'), onclick: () => runAction(() => actions.moveAnimation(i, -1)) }, ['↑']),
+        h('button', { class: 'btn', type: 'button', title: t('insp.animMoveDown'), onclick: () => runAction(() => actions.moveAnimation(i, 1)) }, ['↓']),
+        h('button', { class: 'btn', type: 'button', title: t('insp.animRemove'), onclick: () => runAction(() => actions.removeAnimation(i)) }, ['✕'])
       ])
     );
   }
   // Adding an animation needs a target element, so that form lives in the element panel
-  inspectorEl.append(h('div', { class: 'empty' }, ['Select an element to add animations for it.']));
+  inspectorEl.append(h('div', { class: 'empty' }, [t('insp.animSelectEl')]));
 
   // Slide actions
-  inspectorEl.append(h('h4', {}, ['Slide Actions']));
+  inspectorEl.append(h('h4', {}, [t('insp.slideActions')]));
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      h('button', { class: 'btn', onclick: () => addTextElement() }, ['+ Text Box']),
-      h('button', { class: 'btn', onclick: () => addShapeElement('rect') }, ['+ Rectangle']),
-      h('button', { class: 'btn', onclick: pickImage }, ['+ Image'])
+      h('button', { class: 'btn', type: 'button', onclick: () => addTextElement() }, ['+ ' + t('insp.newTextBox')]),
+      h('button', { class: 'btn', type: 'button', onclick: () => addShapeElement('rect') }, ['+ ' + t('insp.newRectangle')]),
+      h('button', { class: 'btn', type: 'button', onclick: pickImage }, ['+ ' + t('insp.newImage')])
     ])
   );
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.duplicateSlide(state.current)) }, ['Duplicate']),
-      h('button', {
-        class: 'btn',
-        onclick: () => {
-          if (confirm('Delete this slide?')) runAction(() => actions.deleteSlide(state.current));
-        }
-      }, ['Delete'])
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.duplicateSlide(state.current)) }, [t('cmd.duplicateSlide')]),
+      h('button', { class: 'btn', type: 'button', onclick: () => void deleteCurrentSlide() }, [t('cmd.deleteSlide')])
     ])
   );
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.moveSlide(state.current, Math.max(0, state.current - 1))) }, ['Move Up']),
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.moveSlide(state.current, Math.min(store.slideCount - 1, state.current + 1))) }, ['Move Down'])
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.moveSlide(state.current, Math.max(0, state.current - 1))) }, [t('insp.moveUp')]),
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.moveSlide(state.current, Math.min(store.slideCount - 1, state.current + 1))) }, [t('insp.moveDown')])
     ])
   );
 }
@@ -1599,44 +2025,66 @@ function firstHref(el: any): string {
 
 // ---- Element-level properties ----
 function renderElementInspector(el: any) {
-  inspectorEl.append(h('h4', {}, ['Element: ' + (el.type || 'unknown')]));
+  inspectorEl.append(h('h4', {}, [t('insp.element', t(`el.type.${el.type}`, t('el.type.unknown')))]));
+  inspectorEl.append(h('div', { class: 'muted el-kind' }, [t(`el.type.${el.type}`, el.type || t('el.type.element'))]));
 
   const update = (patch: any) => runAction(() => actions.updateElement(el.id, patch));
   const geom = h('div', {});
-  geom.append(numField('X', el.x, (v) => update({ x: v })));
-  geom.append(numField('Y', el.y, (v) => update({ y: v })));
-  geom.append(numField('Width', el.width, (v) => update({ width: Math.max(1, v) })));
-  geom.append(numField('Height', el.height, (v) => update({ height: Math.max(1, v) })));
-  geom.append(numField('Rotation', el.rotation, (v) => update({ rotation: v })));
+  geom.append(numField(t('insp.x'), el.x, (v) => update({ x: v })));
+  geom.append(numField(t('insp.y'), el.y, (v) => update({ y: v })));
+  geom.append(numField(t('insp.w'), el.width, (v) => update({ width: Math.max(1, v) })));
+  geom.append(numField(t('insp.h'), el.height, (v) => update({ height: Math.max(1, v) })));
+  geom.append(numField(t('insp.rotation'), el.rotation, (v) => update({ rotation: v })));
   inspectorEl.append(geom);
 
   if (el.type === 'text') {
-    const ta = h('textarea', { placeholder: 'Text content...' }, [el.text || '']);
+    const ta = h('textarea', { placeholder: t('insp.textPlaceholder') }, [el.text || '']);
     ta.addEventListener('focus', () => (state.editingText = true));
     ta.addEventListener('blur', () => (state.editingText = false));
     ta.addEventListener(
       'input',
       debounce(() => runAction(() => actions.updateElement(el.id, { text: ta.value }, { history: false })), 400)
     );
-    inspectorEl.append(h('div', { class: 'field', style: 'align-items:flex-start' }, [h('label', {}, ['Text']), ta]));
+    inspectorEl.append(h('div', { class: 'field', style: 'align-items:flex-start' }, [h('label', {}, [t('insp.text')]), ta]));
 
-    inspectorEl.append(colorField('Color', el.color || '#1e1e1e', (v) => update({ color: v })));
-    inspectorEl.append(numField('Font Size', el.fontSize, (v) => update({ fontSize: v })));
-    inspectorEl.append(selectField('Align', ['left', 'center', 'right', 'justify'], el.align || 'left', (v) => update({ align: v })));
-    inspectorEl.append(selectField('Vertical', ['top', 'middle', 'bottom'], el.valign || 'top', (v) => update({ valign: v })));
-    inspectorEl.append(checkField('Bold', !!el.bold, (v) => runAction(() => actions.applyTextStyleSel({ bold: v }))));
-    inspectorEl.append(checkField('Italic', !!el.italic, (v) => runAction(() => actions.applyTextStyleSel({ italic: v }))));
-    inspectorEl.append(checkField('Underline', !!el.underline, (v) => runAction(() => actions.applyTextStyleSel({ underline: v }))));
-    inspectorEl.append(selectField('Font', FONT_LIST, el.fontFace || FONT_LIST[0], (v) => update({ fontFace: v })));
-    inspectorEl.append(numField('Line Spacing', el.lineSpacing || 1.15, (v) => update({ lineSpacing: Math.max(0.5, v) })));
-    inspectorEl.append(checkField('Bullet', !!el.bullet, (v) => runAction(() => actions.applyTextStyleSel({ bullet: !!v }))));
+    inspectorEl.append(colorField(t('insp.color'), el.color || '#1e1e1e', (v) => update({ color: v })));
+    inspectorEl.append(numField(t('insp.fontSize'), el.fontSize, (v) => update({ fontSize: v })));
+    inspectorEl.append(
+      selectField(
+        t('insp.align'),
+        ['left', 'center', 'right', 'justify'].map((v) => ({ value: v, label: data('align', v, v) })),
+        el.align || 'left',
+        (v) => update({ align: v })
+      )
+    );
+    inspectorEl.append(
+      selectField(
+        t('insp.valign'),
+        ['top', 'middle', 'bottom'].map((v) => ({ value: v, label: data('valign', v, v) })),
+        el.valign || 'top',
+        (v) => update({ valign: v })
+      )
+    );
+    inspectorEl.append(checkField(t('cmd.bold'), !!el.bold, (v) => runAction(() => actions.applyTextStyleSel({ bold: v }))));
+    inspectorEl.append(checkField(t('cmd.italic'), !!el.italic, (v) => runAction(() => actions.applyTextStyleSel({ italic: v }))));
+    inspectorEl.append(checkField(t('cmd.underline'), !!el.underline, (v) => runAction(() => actions.applyTextStyleSel({ underline: v }))));
+    inspectorEl.append(
+      selectField(
+        t('insp.font'),
+        FONT_LIST.map((f: string) => ({ value: f, label: data('font', f, f) })),
+        el.fontFace || FONT_LIST[0],
+        (v) => update({ fontFace: v })
+      )
+    );
+    inspectorEl.append(numField(t('insp.lineSpacing'), el.lineSpacing || 1.15, (v) => update({ lineSpacing: Math.max(0.5, v) })));
+    inspectorEl.append(checkField(t('cmd.bullets'), !!el.bullet, (v) => runAction(() => actions.applyTextStyleSel({ bullet: !!v }))));
     // Hyperlinks live on runs, so writes are propagated to every run of the element
     inspectorEl.append(
-      textField('Link', firstHref(el), (v) =>
+      textField(t('insp.link'), firstHref(el), (v) =>
         runAction(() => {
-          const t = store.findElement(el.id);
-          if (!t) return;
-          const paras = (t.paragraphs || []).map((p: any) => ({
+          const elx = store.findElement(el.id);
+          if (!elx) return;
+          const paras = (elx.paragraphs || []).map((p: any) => ({
             ...p,
             runs: (p.runs || []).map((r: any) => ({ ...r, href: v || undefined }))
           }));
@@ -1645,22 +2093,27 @@ function renderElementInspector(el: any) {
       )
     );
   } else if (el.type === 'shape') {
-    inspectorEl.append(textField('Shape', el.shapeType || 'rect', (v) => update({ shapeType: v })));
+    inspectorEl.append(textField(t('insp.shape'), el.shapeType || 'rect', (v) => update({ shapeType: v })));
     const fillObj: any = el.fill && typeof el.fill === 'object' ? el.fill : null;
     const flatFill = fillObj && fillObj.color ? fillObj.color : (typeof el.fill === 'string' && el.fill !== 'none' ? el.fill : '#4285f4');
     inspectorEl.append(
-      selectField('Fill', ['solid', 'gradient', 'image', 'pattern', 'none'], fillObj?.type || 'solid', (v) => {
-        if (v === 'none') update({ fill: 'none' });
-        else if (v === 'gradient') update({ fill: { type: 'gradient', angle: fillObj?.angle ?? 90, colors: [flatFill, '#ffffff'] } });
-        else if (v === 'image') update({ fill: { type: 'image', data: '', extension: 'png', tile: { sx: 1, sy: 1 }, srcRect: { l: 0, t: 0, r: 0, b: 0 } } });
-        else if (v === 'pattern') update({ fill: { type: 'pattern', prst: 'pct5', fg: '#000000', bg: '#ffffff' } });
-        else update({ fill: flatFill });
-      })
+      selectField(
+        t('insp.fill'),
+        ['solid', 'gradient', 'image', 'pattern', 'none'].map((v) => ({ value: v, label: data('fill', v, v) })),
+        fillObj?.type || 'solid',
+        (v) => {
+          if (v === 'none') update({ fill: 'none' });
+          else if (v === 'gradient') update({ fill: { type: 'gradient', angle: fillObj?.angle ?? 90, colors: [flatFill, '#ffffff'] } });
+          else if (v === 'image') update({ fill: { type: 'image', data: '', extension: 'png', tile: { sx: 1, sy: 1 }, srcRect: { l: 0, t: 0, r: 0, b: 0 } } });
+          else if (v === 'pattern') update({ fill: { type: 'pattern', prst: 'pct5', fg: '#000000', bg: '#ffffff' } });
+          else update({ fill: flatFill });
+        }
+      )
     );
     if (!fillObj || fillObj.type !== 'none') {
       if (!fillObj || (fillObj.type !== 'image' && fillObj.type !== 'pattern')) {
         inspectorEl.append(
-          colorField('Fill Color', flatFill, (v) => {
+          colorField(t('insp.fillColor'), flatFill, (v) => {
             if (fillObj && fillObj.type === 'gradient') update({ fill: { ...fillObj, colors: [v, fillObj.colors?.[1] || '#ffffff'] } });
             else update({ fill: v });
           })
@@ -1668,36 +2121,54 @@ function renderElementInspector(el: any) {
       }
       if (fillObj && fillObj.type === 'gradient') {
         inspectorEl.append(
-          selectField('Gradient', [['0', 'Horizontal'], ['90', 'Vertical'], ['45', 'Diagonal']], String(fillObj.angle ?? 90), (v) =>
-            update({ fill: { ...fillObj, angle: Number(v) } })
+          selectField(
+            t('insp.gradient'),
+            [
+              ['0', t('data.gradient.horizontal')],
+              ['90', t('data.gradient.vertical')],
+              ['45', t('data.gradient.diagonal')]
+            ],
+            String(fillObj.angle ?? 90),
+            (v) => update({ fill: { ...fillObj, angle: Number(v) } })
           )
         );
         inspectorEl.append(
-          colorField('Fill Color 2', fillObj.colors?.[1] || '#ffffff', (v) =>
+          colorField(t('insp.fillColor2'), fillObj.colors?.[1] || '#ffffff', (v) =>
             update({ fill: { ...fillObj, colors: [fillObj.colors?.[0] || flatFill, v] } })
           )
         );
       }
       if (fillObj && fillObj.type === 'image') {
-        inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', title: 'Choose an image to fill the shape', onclick: () => pickFillImage(el.id) }, ['Choose image…'])]));
+        inspectorEl.append(
+          h('div', { class: 'row' }, [
+            h('button', { class: 'btn', type: 'button', title: t('insp.chooseImage'), onclick: () => pickFillImage(el.id) }, [t('insp.chooseImage')])
+          ])
+        );
         const tile: any = fillObj.tile || { sx: 1, sy: 1 };
-        inspectorEl.append(numField('Tile X', tile.sx ?? 1, (v) => update({ fill: { ...fillObj, tile: { ...tile, sx: v } } })));
-        inspectorEl.append(numField('Tile Y', tile.sy ?? 1, (v) => update({ fill: { ...fillObj, tile: { ...tile, sy: v } } })));
+        inspectorEl.append(numField(t('insp.tileX'), tile.sx ?? 1, (v) => update({ fill: { ...fillObj, tile: { ...tile, sx: v } } })));
+        inspectorEl.append(numField(t('insp.tileY'), tile.sy ?? 1, (v) => update({ fill: { ...fillObj, tile: { ...tile, sy: v } } })));
         const rc: any = fillObj.srcRect || { l: 0, t: 0, r: 0, b: 0 };
-        inspectorEl.append(h('h4', {}, ['Crop %']));
-        inspectorEl.append(numField('Left', rc.l ?? 0, (v) => update({ fill: { ...fillObj, srcRect: { ...rc, l: clamp(v, 0, 100) } } })));
-        inspectorEl.append(numField('Top', rc.t ?? 0, (v) => update({ fill: { ...fillObj, srcRect: { ...rc, t: clamp(v, 0, 100) } } })));
-        inspectorEl.append(numField('Right', rc.r ?? 0, (v) => update({ fill: { ...fillObj, srcRect: { ...rc, r: clamp(v, 0, 100) } } })));
-        inspectorEl.append(numField('Bottom', rc.b ?? 0, (v) => update({ fill: { ...fillObj, srcRect: { ...rc, b: clamp(v, 0, 100) } } })));
+        inspectorEl.append(h('h4', {}, [t('insp.crop')]));
+        inspectorEl.append(numField(t('insp.left'), rc.l ?? 0, (v) => update({ fill: { ...fillObj, srcRect: { ...rc, l: clamp(v, 0, 100) } } })));
+        inspectorEl.append(numField(t('insp.top'), rc.t ?? 0, (v) => update({ fill: { ...fillObj, srcRect: { ...rc, t: clamp(v, 0, 100) } } })));
+        inspectorEl.append(numField(t('insp.right'), rc.r ?? 0, (v) => update({ fill: { ...fillObj, srcRect: { ...rc, r: clamp(v, 0, 100) } } })));
+        inspectorEl.append(numField(t('insp.bottom'), rc.b ?? 0, (v) => update({ fill: { ...fillObj, srcRect: { ...rc, b: clamp(v, 0, 100) } } })));
       }
       if (fillObj && fillObj.type === 'pattern') {
-        inspectorEl.append(selectField('Pattern', PATTERN_LIST, fillObj.prst || 'pct5', (v) => update({ fill: { ...fillObj, prst: v } })));
-        inspectorEl.append(colorField('Foreground', fillObj.fg || '#000000', (v) => update({ fill: { ...fillObj, fg: v } })));
-        inspectorEl.append(colorField('Background', fillObj.bg || '#ffffff', (v) => update({ fill: { ...fillObj, bg: v } })));
+        inspectorEl.append(
+          selectField(
+            t('insp.pattern'),
+            PATTERN_LIST.map((p) => ({ value: p[0], label: data('pattern', p[0], p[1]) })),
+            fillObj.prst || 'pct5',
+            (v) => update({ fill: { ...fillObj, prst: v } })
+          )
+        );
+        inspectorEl.append(colorField(t('insp.foreground'), fillObj.fg || '#000000', (v) => update({ fill: { ...fillObj, fg: v } })));
+        inspectorEl.append(colorField(t('insp.backgroundColor'), fillObj.bg || '#ffffff', (v) => update({ fill: { ...fillObj, bg: v } })));
       }
       if (!fillObj || (fillObj.type !== 'image' && fillObj.type !== 'pattern')) {
         inspectorEl.append(
-          numField('Fill Transparency %', fillObj?.transparency ?? 0, (v) =>
+          numField(t('insp.transparency'), fillObj?.transparency ?? 0, (v) =>
             update({ fill: { ...(fillObj || { type: 'solid', color: flatFill }), transparency: clamp(v, 0, 100) } })
           )
         );
@@ -1705,153 +2176,193 @@ function renderElementInspector(el: any) {
     }
     const lineColor = el.line && el.line !== 'none' ? el.line.color || '#000' : '#000';
     const lineWidth = el.line && el.line !== 'none' ? el.line.width || 1 : 1;
-    inspectorEl.append(colorField('Border Color', lineColor, (v) => update({ line: { color: v, width: lineWidth } })));
-    inspectorEl.append(numField('Border Width', lineWidth, (v) => update({ line: v > 0 ? { color: lineColor, width: v } : 'none' })));
+    inspectorEl.append(colorField(t('insp.borderColor'), lineColor, (v) => update({ line: { color: v, width: lineWidth } })));
+    inspectorEl.append(numField(t('insp.borderWidth'), lineWidth, (v) => update({ line: v > 0 ? { color: lineColor, width: v } : 'none' })));
   } else if (el.type === 'image') {
     const adj: any = el.imageAdjust || {};
-    inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', onclick: pickImage }, ['Replace Image'])]));
-    inspectorEl.append(numField('Brightness', adj.brightness ?? 0, (v) => update({ imageAdjust: { ...adj, brightness: clamp(v, -100, 100) } })));
-    inspectorEl.append(numField('Contrast', adj.contrast ?? 0, (v) => update({ imageAdjust: { ...adj, contrast: clamp(v, -100, 100) } })));
-    inspectorEl.append(numField('Transparency %', adj.transparency ?? 0, (v) => update({ imageAdjust: { ...adj, transparency: clamp(v, 0, 100) } })));
+    inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', type: 'button', onclick: pickImage }, [t('insp.replaceImage')])]));
+    inspectorEl.append(numField(t('insp.brightness'), adj.brightness ?? 0, (v) => update({ imageAdjust: { ...adj, brightness: clamp(v, -100, 100) } })));
+    inspectorEl.append(numField(t('insp.contrast'), adj.contrast ?? 0, (v) => update({ imageAdjust: { ...adj, contrast: clamp(v, -100, 100) } })));
+    inspectorEl.append(numField(t('insp.transparency'), adj.transparency ?? 0, (v) => update({ imageAdjust: { ...adj, transparency: clamp(v, 0, 100) } })));
   } else if (el.type === 'table') {
     const rowCount = (el.rows || []).length;
     const colCount = Math.max(1, ...(el.rows || []).map((r: any) => (r.cells || []).length));
-    inspectorEl.append(numField('Rows', rowCount, (v) => runAction(() => actions.resizeTable(el, Math.max(1, v), colCount))));
-    inspectorEl.append(numField('Columns', colCount, (v) => runAction(() => actions.resizeTable(el, rowCount, Math.max(1, v)))));
-    inspectorEl.append(checkField('Header Row', !!el.headerRow, (v) => update({ headerRow: v })));
-    inspectorEl.append(colorField('Border Color', el.border?.color || '#cfd8e3', (v) => update({ border: { ...(el.border || { width: 1 }), color: v } })));
-    inspectorEl.append(numField('Border Width', el.border?.width ?? 1, (v) => update({ border: { ...(el.border || { color: '#cfd8e3' }), width: v } })));
-    inspectorEl.append(colorField('Header Fill', el.headerFill || '#1A73E8', (v) => update({ headerFill: v })));
-    inspectorEl.append(colorField('Cell Fill', el.cellFill || '#ffffff', (v) => update({ cellFill: v })));
-    inspectorEl.append(numField('Font Size', el.fontSize || 16, (v) => update({ fontSize: v })));
+    inspectorEl.append(numField(t('insp.rows'), rowCount, (v) => runAction(() => actions.resizeTable(el, Math.max(1, v), colCount))));
+    inspectorEl.append(numField(t('insp.columns'), colCount, (v) => runAction(() => actions.resizeTable(el, rowCount, Math.max(1, v)))));
+    inspectorEl.append(checkField(t('insp.headerRow'), !!el.headerRow, (v) => update({ headerRow: v })));
+    inspectorEl.append(colorField(t('insp.borderColor'), el.border?.color || '#cfd8e3', (v) => update({ border: { ...(el.border || { width: 1 }), color: v } })));
+    inspectorEl.append(numField(t('insp.borderWidth'), el.border?.width ?? 1, (v) => update({ border: { ...(el.border || { color: '#cfd8e3' }), width: v } })));
+    inspectorEl.append(colorField(t('insp.headerFill'), el.headerFill || '#1A73E8', (v) => update({ headerFill: v })));
+    inspectorEl.append(colorField(t('insp.cellFill'), el.cellFill || '#ffffff', (v) => update({ cellFill: v })));
+    inspectorEl.append(numField(t('insp.fontSize'), el.fontSize || 16, (v) => update({ fontSize: v })));
     const inset: any = el.inset || {};
-    inspectorEl.append(h('h4', {}, ['Cell Padding']));
+    inspectorEl.append(h('h4', {}, [t('insp.cellPadding')]));
     inspectorEl.append(
       h('div', { class: 'row' }, [
-        numField('L', inset.l ?? 6, (v) => update({ inset: { ...inset, l: v } })),
-        numField('R', inset.r ?? 6, (v) => update({ inset: { ...inset, r: v } }))
+        numField(t('insp.left'), inset.l ?? 6, (v) => update({ inset: { ...inset, l: v } })),
+        numField(t('insp.right'), inset.r ?? 6, (v) => update({ inset: { ...inset, r: v } }))
       ])
     );
     inspectorEl.append(
       h('div', { class: 'row' }, [
-        numField('T', inset.t ?? 4, (v) => update({ inset: { ...inset, t: v } })),
-        numField('B', inset.b ?? 4, (v) => update({ inset: { ...inset, b: v } }))
+        numField(t('insp.top'), inset.t ?? 4, (v) => update({ inset: { ...inset, t: v } })),
+        numField(t('insp.bottom'), inset.b ?? 4, (v) => update({ inset: { ...inset, b: v } }))
       ])
     );
-    inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', onclick: () => editTable(el.id) }, ['Edit Cells…'])]));
+    inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', type: 'button', onclick: () => editTable(el.id) }, [t('insp.editCells')])]));
   } else if (el.type === 'chart') {
-    inspectorEl.append(selectField('Chart Type', (CHART_TYPES || []).map((t: any) => [t.value, t.name]), el.chartType || 'bar', (v) => update({ chartType: v })));
-    inspectorEl.append(checkField('Legend', !!el.legend, (v) => update({ legend: v })));
-    inspectorEl.append(checkField('Data Labels', !!el.dataLabels, (v) => update({ dataLabels: v })));
-    inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', onclick: () => editChart(el.id) }, ['Edit Data…'])]));
-    inspectorEl.append(h('div', { class: 'empty' }, ['Edit series and categories, or double-click the chart.']));
+    inspectorEl.append(
+      selectField(
+        t('insp.chartType'),
+        (CHART_TYPES || []).map((x: any) => ({ value: x.value, label: data('chartType', x.value, x.name) })),
+        el.chartType || 'barChart',
+        (v) => update({ chartType: v })
+      )
+    );
+    inspectorEl.append(checkField(t('insp.legend'), !!el.legend, (v) => update({ legend: v })));
+    inspectorEl.append(checkField(t('insp.dataLabels'), !!el.dataLabels, (v) => update({ dataLabels: v })));
+    inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', type: 'button', onclick: () => editChart(el.id) }, [t('insp.editData')])]));
+    inspectorEl.append(h('div', { class: 'empty' }, [t('insp.chartHint')]));
   } else if (el.type === 'video' || el.type === 'audio') {
-    inspectorEl.append(textField('Name', el.name || '', (v) => update({ name: v })));
+    inspectorEl.append(textField(t('insp.name'), el.name || '', (v) => update({ name: v })));
     inspectorEl.append(
       h('div', { class: 'row' }, [
-        h('button', { class: 'btn', title: 'Replace the media source', onclick: () => pickReplaceMedia(el.id) }, ['Replace Media…']),
-        h('button', { class: 'btn', title: 'Replace the poster image', onclick: () => pickPoster(el.id) }, ['Replace Poster…'])
+        h('button', { class: 'btn', type: 'button', title: t('insp.replaceMedia'), onclick: () => pickReplaceMedia(el.id) }, [t('insp.replaceMedia')]),
+        h('button', { class: 'btn', type: 'button', title: t('insp.replacePoster'), onclick: () => pickPoster(el.id) }, [t('insp.replacePoster')])
       ])
     );
   } else {
-    inspectorEl.append(h('div', { class: 'empty' }, ['This type only supports move / resize / delete']));
+    inspectorEl.append(h('div', { class: 'empty' }, [t('insp.typeUnsupported')]));
   }
 
   // Visual options shared by every element type
-  inspectorEl.append(h('h4', {}, ['Appearance']));
+  inspectorEl.append(h('h4', {}, [t('insp.appearance')]));
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      h('button', { class: 'btn', onclick: () => update({ flipH: !el.flipH }) }, [el.flipH ? 'Unflip H' : 'Flip H']),
-      h('button', { class: 'btn', onclick: () => update({ flipV: !el.flipV }) }, [el.flipV ? 'Unflip V' : 'Flip V'])
+      h('button', { class: 'btn', type: 'button', onclick: () => update({ flipH: !el.flipH }) }, [el.flipH ? t('cmd.unflipH') : t('cmd.flipH')]),
+      h('button', { class: 'btn', type: 'button', onclick: () => update({ flipV: !el.flipV }) }, [el.flipV ? t('cmd.unflipV') : t('cmd.flipV')])
     ])
   );
   inspectorEl.append(
-    checkField('Shadow', !!el.shadow, (v) =>
+    checkField(t('insp.shadow'), !!el.shadow, (v) =>
       update({ shadow: v ? { type: 'outer', angle: 45, distance: 4, blur: 8, transparency: 60, color: '#000000' } : null })
     )
   );
 
   // Element actions
-  inspectorEl.append(h('h4', {}, ['Element Actions']));
+  inspectorEl.append(h('h4', {}, [t('insp.elementActions')]));
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.duplicateSelected()) }, ['Duplicate']),
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.deleteSelected()) }, ['Delete'])
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.duplicateSelected()) }, [t('cmd.duplicate')]),
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.deleteSelected()) }, [t('cmd.delete')])
     ])
   );
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.zOrder('front')) }, ['Bring Front']),
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.zOrder('back')) }, ['Send Back'])
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.zOrder('front')) }, [t('cmd.bringFront')]),
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.zOrder('back')) }, [t('cmd.sendBack')])
     ])
   );
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      h('button', { class: 'btn', title: 'Align left edge to slide', onclick: () => runAction(() => actions.alignElements('left')) }, ['Align L']),
-      h('button', { class: 'btn', title: 'Align horizontal centre', onclick: () => runAction(() => actions.alignElements('hcenter')) }, ['Align C']),
-      h('button', { class: 'btn', title: 'Align top edge to slide', onclick: () => runAction(() => actions.alignElements('top')) }, ['Align T']),
-      h('button', { class: 'btn', title: 'Align vertical centre', onclick: () => runAction(() => actions.alignElements('vcenter')) }, ['Align M'])
+      h('button', { class: 'btn', type: 'button', title: t('cmd.alignLeft'), onclick: () => runAction(() => actions.alignElements('left')) }, [t('cmd.alignLeft')]),
+      h('button', { class: 'btn', type: 'button', title: t('cmd.alignCenter'), onclick: () => runAction(() => actions.alignElements('hcenter')) }, [t('cmd.alignCenter')]),
+      h('button', { class: 'btn', type: 'button', title: t('cmd.alignTop'), onclick: () => runAction(() => actions.alignElements('top')) }, [t('cmd.alignTop')]),
+      h('button', { class: 'btn', type: 'button', title: t('cmd.alignMiddle'), onclick: () => runAction(() => actions.alignElements('vcenter')) }, [t('cmd.alignMiddle')])
     ])
   );
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      h('button', { class: 'btn', title: 'Align right edge', onclick: () => runAction(() => actions.alignElements('right')) }, ['Align R']),
-      h('button', { class: 'btn', title: 'Align bottom edge', onclick: () => runAction(() => actions.alignElements('bottom')) }, ['Align B']),
-      h('button', { class: 'btn', title: 'Distribute horizontally (needs 3+ selected)', onclick: () => runAction(() => actions.distribute('h')) }, ['Dist H']),
-      h('button', { class: 'btn', title: 'Distribute vertically (needs 3+ selected)', onclick: () => runAction(() => actions.distribute('v')) }, ['Dist V'])
+      h('button', { class: 'btn', type: 'button', title: t('cmd.alignRight'), onclick: () => runAction(() => actions.alignElements('right')) }, [t('cmd.alignRight')]),
+      h('button', { class: 'btn', type: 'button', title: t('cmd.alignBottom'), onclick: () => runAction(() => actions.alignElements('bottom')) }, [t('cmd.alignBottom')]),
+      h('button', { class: 'btn', type: 'button', title: t('cmd.distH'), onclick: () => runAction(() => actions.distribute('h')) }, [t('cmd.distH')]),
+      h('button', { class: 'btn', type: 'button', title: t('cmd.distV'), onclick: () => runAction(() => actions.distribute('v')) }, [t('cmd.distV')])
     ])
   );
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.zOrder('forward')) }, ['Forward']),
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.zOrder('backward')) }, ['Backward']),
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.groupSelection()) }, ['Group']),
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.ungroupSelection()) }, ['Ungroup'])
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.zOrder('forward')) }, [t('cmd.bringForward')]),
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.zOrder('backward')) }, [t('cmd.sendBackward')]),
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.groupSelection()) }, [t('cmd.group')]),
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.ungroupSelection()) }, [t('cmd.ungroup')])
     ])
   );
   inspectorEl.append(
     h('div', { class: 'row' }, [
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.toggleLock()) }, [el.locked ? 'Unlock' : 'Lock']),
-      h('button', { class: 'btn', onclick: () => runAction(() => actions.toggleHidden()) }, [el.hidden ? 'Show' : 'Hide'])
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.toggleLock()) }, [el.locked ? t('cmd.unlock') : t('cmd.lock')]),
+      h('button', { class: 'btn', type: 'button', onclick: () => runAction(() => actions.toggleHidden()) }, [el.hidden ? t('cmd.show') : t('cmd.hide')])
     ])
   );
 
   // ---- Animations targeting this element ----
-  inspectorEl.append(h('h4', {}, ['Animations']));
+  inspectorEl.append(h('h4', {}, [t('insp.animations')]));
   const allAnims: any[] = Array.isArray(store.slide?.animations) ? store.slide.animations : [];
-  const mine = allAnims.map((a: any, i: number) => ({ a, i })).filter((t: any) => t.a.target === el.id);
-  if (!mine.length) inspectorEl.append(h('div', { class: 'empty' }, ['No animation on this element']));
-  for (const t of mine) {
+  const mine = allAnims.map((a: any, i: number) => ({ a, i })).filter((x: any) => x.a.target === el.id);
+  if (!mine.length) inspectorEl.append(h('div', { class: 'empty' }, [t('insp.noAnimOnEl')]));
+  for (const x of mine) {
     inspectorEl.append(
       h('div', { class: 'row' }, [
-        h('span', { style: 'flex:1;font-size:11px' }, [`${t.a.presetClass || 'entr'} / ${t.a.type} / ${t.a.trigger || 'onClick'}`]),
-        h('button', { class: 'btn', title: 'Remove animation', onclick: () => runAction(() => actions.removeAnimation(t.i)) }, ['✕'])
+        h('span', { style: 'flex:1;font-size:11px' }, [animLabel(x.a)]),
+        h('button', { class: 'btn', type: 'button', title: t('insp.animRemove'), onclick: () => runAction(() => actions.removeAnimation(x.i)) }, ['✕'])
       ])
     );
   }
-  const pick = { cls: 'entr', type: (ANIM_TYPES.entr[0] || {}).value, trigger: 'onClick', direction: (ANIM_DIRECTIONS[0] || {}).value, duration: 500 };
+  // Default trigger is 'afterPrev' (auto-play when the slide appears) so a freshly added
+  // animation is actually visible during the slideshow without requiring a click first.
+  const pick = { cls: 'entr', type: (ANIM_TYPES.entr[0] || {}).value, trigger: 'afterPrev', direction: (ANIM_DIRECTIONS[0] || {}).value, duration: 500 };
   const typeWrap = h('div', {});
   const renderTypes = () => {
     typeWrap.innerHTML = '';
-    const opts: string[] = (ANIM_TYPES[pick.cls] || []).map((x: any) => x.value);
-    if (!opts.includes(pick.type)) pick.type = opts[0];
-    typeWrap.append(selectField('Type', opts, pick.type, (v) => (pick.type = v)));
+    typeWrap.append(
+      selectField(
+        t('insp.animType'),
+        (ANIM_TYPES[pick.cls] || []).map((x: any) => ({ value: x.value, label: data('animType', x.value, x.name) })),
+        pick.type,
+        (v) => (pick.type = v)
+      )
+    );
   };
   renderTypes();
-  inspectorEl.append(
-    selectField('Class', ANIM_CLASSES.map((c: any) => c.value), pick.cls, (v) => {
-      pick.cls = v;
-      renderTypes();
-    })
+
+  // The "choose animation" form is hidden by default — it is only shown once the user
+  // explicitly clicks "add animation", so elements without animations don't show the
+  // configuration controls they don't (yet) need.
+  const formWrap = h('div', { class: 'anim-add-form' });
+  formWrap.style.display = 'none';
+  formWrap.append(
+    selectField(
+      t('insp.animClass'),
+      ANIM_CLASSES.map((c: any) => ({ value: c.value, label: data('animClass', c.value, c.name) })),
+      pick.cls,
+      (v) => {
+        pick.cls = v;
+        renderTypes();
+      }
+    )
   );
-  inspectorEl.append(typeWrap);
-  inspectorEl.append(selectField('Trigger', ['onClick', 'withPrev', 'afterPrev'], pick.trigger, (v) => (pick.trigger = v)));
-  inspectorEl.append(selectField('Direction', ANIM_DIRECTIONS.map((d: any) => [d.value, d.name]), pick.direction, (v) => (pick.direction = v)));
-  inspectorEl.append(numField('Duration (ms)', pick.duration, (v) => (pick.duration = Math.max(0, Math.round(v)))));
-  inspectorEl.append(
+  formWrap.append(typeWrap);
+  formWrap.append(
+    selectField(
+      t('insp.animTrigger'),
+      ['onClick', 'withPrev', 'afterPrev'].map((v) => ({ value: v, label: data('trigger', v, v) })),
+      pick.trigger,
+      (v) => (pick.trigger = v)
+    )
+  );
+  formWrap.append(
+    selectField(
+      t('insp.animDirection'),
+      ANIM_DIRECTIONS.map((d: any) => ({ value: d.value, label: data('animDir', d.value, d.name) })),
+      pick.direction,
+      (v) => (pick.direction = v)
+    )
+  );
+  formWrap.append(numField(t('insp.animDuration'), pick.duration, (v) => (pick.duration = Math.max(0, Math.round(v)))));
+  formWrap.append(
     h('div', { class: 'row' }, [
       h('button', {
         class: 'btn',
+        type: 'button',
         onclick: () =>
           runAction(() =>
             actions.addAnimation({
@@ -1863,16 +2374,28 @@ function renderElementInspector(el: any) {
               trigger: pick.trigger
             })
           )
-      }, ['+ Animation'])
+      }, ['+ ' + t('insp.animAdd')])
     ])
   );
+  // Toggle button: reveals the hidden add-animation form above.
+  inspectorEl.append(
+    h('div', { class: 'row' }, [
+      h('button', {
+        class: 'btn',
+        type: 'button',
+        title: t('insp.animAdd'),
+        onclick: () => { formWrap.style.display = formWrap.style.display === 'none' ? '' : 'none'; }
+      }, ['＋ ' + t('insp.animAdd')])
+    ])
+  );
+  inspectorEl.append(formWrap);
 }
 
 // ---------- Field builders ----------
 function colorField(label: string, value: string, onInput: (v: string) => void) {
   const input = h('input', { type: 'color', value: toHex(value) });
   input.addEventListener('input', () => onInput(input.value));
-  const clear = h('button', { class: 'btn', style: 'padding:2px 6px', title: 'Set to none', onclick: () => onInput('none') }, ['None']);
+  const clear = h('button', { class: 'btn', type: 'button', style: 'padding:2px 6px', title: t('insp.setNone'), onclick: () => onInput('none') }, [t('common.none')]);
   return h('div', { class: 'field' }, [h('label', {}, [label]), input, clear]);
 }
 function textField(label: string, value: string, onInput: (v: string) => void) {
@@ -1885,11 +2408,12 @@ function numField(label: string, value: any, onInput: (v: number) => void) {
   input.addEventListener('change', () => onInput(num(input.value)));
   return h('div', { class: 'field' }, [h('label', {}, [label]), input]);
 }
-function selectField(label: string, options: (string | [string, string])[], value: string, onInput: (v: string) => void) {
+type FieldOption = string | [string, string] | { value: string; label: string };
+function selectField(label: string, options: FieldOption[], value: string, onInput: (v: string) => void) {
   const sel = h('select', {});
   for (const o of options) {
-    const val = Array.isArray(o) ? o[0] : o;
-    const txt = Array.isArray(o) ? o[1] : o;
+    const val = typeof o === 'object' && !Array.isArray(o) ? o.value : Array.isArray(o) ? o[0] : o;
+    const txt = typeof o === 'object' && !Array.isArray(o) ? o.label : Array.isArray(o) ? o[1] : o;
     sel.append(h('option', { value: val, ...(val === value ? { selected: 'selected' } : {}) }, [txt]));
   }
   sel.addEventListener('change', () => onInput(sel.value));
@@ -2110,36 +2634,29 @@ function addMedia(type: 'video' | 'audio', data: string, ext: string) {
 function toggleGrid() {
   state.grid = !state.grid;
   gridEl.className = 'grid-overlay' + (state.grid ? ' on' : '');
-  gridBtn.style.background = state.grid ? 'var(--accent)' : '';
+  gridBtn.classList.toggle('on', state.grid);
+  ribbon.sync(ribbonState());
 }
 
 function toggleSnap() {
   store.setView({ snap: store.snap === false });
-  snapBtn.style.background = store.snap !== false ? 'var(--accent)' : '';
+  snapBtn.classList.toggle('on', store.snap !== false);
+  ribbon.sync(ribbonState());
 }
 function toggleDocInfo() {
   const on = docInfoEl.classList.toggle('on');
   if (on) renderDocInfo();
 }
 
-const META_LABELS: Record<string, string> = {
-  title: 'Title',
-  subject: 'Subject',
-  author: 'Author',
-  keywords: 'Keywords',
-  description: 'Description',
-  lastModifiedBy: 'Last Modified By',
-  created: 'Created',
-  modified: 'Modified',
-  category: 'Category',
-  status: 'Status',
-  contentType: 'Content Type',
-  language: 'Language'
-};
+// Document-property labels come from the dictionary (core.xml field names → meta.* keys).
+const META_KEYS = [
+  'title', 'subject', 'author', 'keywords', 'description', 'lastModifiedBy',
+  'created', 'modified', 'category', 'status', 'contentType', 'language'
+];
 
 function kvTable(obj: any, labels?: Record<string, string>) {
   const keys = Object.keys(obj || {}).filter((k) => obj[k] != null && obj[k] !== '');
-  if (!keys.length) return h('div', { class: 'empty' }, ['(none)']);
+  if (!keys.length) return h('div', { class: 'empty' }, [t('doc.none')]);
   const table = h('table', { class: 'kv' });
   for (const k of keys) {
     table.append(
@@ -2152,140 +2669,508 @@ function kvTable(obj: any, labels?: Record<string, string>) {
 /** Render document properties: metadata (core.xml) + custom properties (custom.xml) */
 function renderDocInfo() {
   docInfoEl.innerHTML = '';
+  const labels: Record<string, string> = {};
+  for (const k of META_KEYS) labels[k] = t(`meta.${k}`, k);
   docInfoEl.append(
     h('div', { class: 'doc-info-head' }, [
-      h('span', {}, ['Document Properties']),
-      h('button', { class: 'btn', style: 'padding:2px 8px', onclick: () => docInfoEl.classList.remove('on') }, ['Close'])
+      h('span', {}, [t('doc.title')]),
+      h('button', {
+        class: 'btn',
+        type: 'button',
+        style: 'padding:2px 8px',
+        onclick: () => docInfoEl.classList.remove('on')
+      }, [t('common.close')])
     ])
   );
   const source = state.mode === 'edit' ? store.doc : state.preview;
-  docInfoEl.append(h('h4', {}, ['Metadata']), kvTable(source?.metadata, META_LABELS));
-  docInfoEl.append(h('h4', {}, ['Custom Properties']), kvTable(source?.customProps));
+  docInfoEl.append(h('h4', {}, [t('doc.metadata')]), kvTable(source?.metadata, labels));
+  docInfoEl.append(h('h4', {}, [t('doc.custom')]), kvTable(source?.customProps));
 }
 
-async function startPresent() {
+/** `fromCurrent` shows the show from the current slide (Shift+F5) instead of the first one. */
+async function startPresent(fromCurrent = false) {
+  if (state.mode === 'edit' && store.editingId) commitEditing();
+  if (!fromCurrent) state.current = 0;
+  if (state.mode === 'edit') store.setSlide(state.current);
   presentEl.className = 'present on';
   await renderPresent();
+  renderAll();
 }
-async function renderPresent() {
-  // Present the most faithful rendering available: the current bytes through pptxToHtml
+
+/** Leave the show (Esc, the overlay button, or stepping past the last slide). */
+function stopPresent() {
+  if (!presentEl.classList.contains('on')) return;
+  presentEl.className = 'present';
   disposeStaleCharts();
-  if (!state.present || state.present.version !== state.version) {
-    try {
-      const bytes = state.latest;
-      if (!bytes?.length) return;
-      const result = await pptxToHtml(bytes, PARSE_OPTS);
-      state.present = { slides: result.slides.map((s: any) => s.html), charts: result.charts || [], version: state.version };
-    } catch (e: any) {
-      toast('Present failed: ' + (e?.message || String(e)), 'error');
-      return;
+  renderAll();
+}
+
+/**
+ * Render the current slide into the presentation host.
+ *
+ * Edit mode renders straight from the editor model via `renderSlideInto` (so every element keeps
+ * its `data-id`, which is what element animations target). Preview mode falls back to the faithful
+ * `pptxToHtml` bytes rendering.
+ *
+ * Two stacked layers (`.present-layer`) are used so the outgoing and incoming slides can animate
+ * simultaneously for slide transitions.
+ *
+ * @param dir   navigation direction (1 = forward, -1 = backward) — drives directional transitions.
+ * @param withTransition  false on a pure resize redraw, where re-playing the transition is unwanted.
+ */
+async function renderPresent(dir = 1, withTransition = true): Promise<void> {
+  disposeStaleCharts();
+  const editing = state.mode === 'edit' && !!store.doc && !!store.doc.slides;
+  const sz = editing ? store.doc.slideSize || state.slideSize : state.slideSize;
+  const prev = presentHostEl.querySelector('.present-layer') as HTMLElement | null;
+
+  const layer = h('div', { class: 'present-layer' });
+  if (editing) {
+    const slide: any = store.doc.slides[state.current];
+    renderSlideInto(layer, slide, store.doc, {});
+    applyEntranceAnimations(layer, slide);
+  } else {
+    if (!state.present || state.present.version !== state.version) {
+      try {
+        const bytes = state.latest;
+        if (!bytes?.length) return;
+        const result = await pptxToHtml(bytes, PARSE_OPTS);
+        state.present = {
+          slides: result.slides.map((s: any) => s.html),
+          charts: result.charts || [],
+          version: state.version,
+          global: result.styles?.global
+        };
+      } catch (e: any) {
+        toast(t('toast.presentFailed', e?.message || String(e)), 'error');
+        return;
+      }
     }
+    if (state.present.global) ensureGlobalStyles(state.present.global);
+    layer.innerHTML = state.present.slides[state.current] || '';
   }
-  const html = state.present.slides[state.current] || '';
-  presentHostEl.style.width = state.slideSize.width + 'px';
-  presentHostEl.style.height = state.slideSize.height + 'px';
-  presentHostEl.innerHTML = html;
-  // Charts need a measurable host, and media should only start once layout settled
+
+  presentHostEl.style.width = sz.width + 'px';
+  presentHostEl.style.height = sz.height + 'px';
+  presentCountEl.textContent = t('present.counter', state.current + 1, slideCount());
+
+  const trans: any = editing ? store.doc.slides[state.current].transition || { type: 'none' } : { type: 'none' };
+  const playTrans = withTransition && !!prev && trans.type && trans.type !== 'none';
+  if (playTrans) {
+    presentHostEl.appendChild(layer);
+    const bandType = trans.type === 'blinds' || trans.type === 'split' || trans.type === 'randomBar';
+    if (bandType) playBandTransition(prev!, layer, trans, dir >= 0 ? 1 : -1);
+    else playSlideTransition(prev!, layer, trans, dir);
+    const dur = (trans.duration || 800) + 80;
+    setTimeout(() => {
+      if (prev && prev.parentNode === presentHostEl) prev.remove();
+    }, dur);
+  } else {
+    if (prev) prev.remove();
+    presentHostEl.appendChild(layer);
+  }
+
+  const z = Math.min(window.innerWidth / sz.width, window.innerHeight / sz.height) * 0.96;
+  presentHostEl.style.transform = `scale(${z})`;
+
   requestAnimationFrame(() => {
-    if (state.present) paintPresentCharts();
-    presentHostEl.querySelectorAll('video').forEach((v) => {
-      v.play().catch(() => {
+    if (!editing) paintPresentCharts();
+    layer.querySelectorAll('video').forEach((v) => {
+      (v as HTMLVideoElement).play().catch(() => {
         /* autoplay may still be blocked; controls remain available */
       });
     });
   });
-  const z = Math.min(window.innerWidth / state.slideSize.width, window.innerHeight / state.slideSize.height) * 0.96;
-  presentHostEl.style.transform = `scale(${z})`;
+}
+
+/** The current slide's transition (edit mode only; preview has no model). */
+function currentTransition(): any {
+  if (state.mode === 'edit' && store.doc?.slides?.[state.current]?.transition) {
+    return store.doc.slides[state.current].transition;
+  }
+  return null;
+}
+
+/**
+ * A click (or Space / →) in the show first advances any pending `onClick` entrance animations on
+ * the current slide; only once those are exhausted does it move to the next slide (matching
+ * PowerPoint's "click steps through animations, then advances"). A transition with
+ * `advanceOnClick: false` never advances on click at all.
+ */
+function presentClick() {
+  if (presentClickIdx < presentClickAnims.length) {
+    const item = presentClickAnims[presentClickIdx++];
+    playEntrance(item.node, item.kf, { ...item.opts, delay: 0 });
+    return;
+  }
+  const trans = currentTransition();
+  if (trans && trans.advanceOnClick === false) return;
+  presentGo(1);
+}
+
+function presentGo(delta: number) {
+  const total = slideCount();
+  const next = state.current + delta;
+  if (next < 0) return;
+  if (next > total - 1) {
+    stopPresent(); // stepping past the last slide ends the show, like PowerPoint
+    return;
+  }
+  state.current = next;
+  renderPresent(delta);
+  if (state.mode === 'edit') store.setSlide(state.current);
+  renderAll();
 }
 function presentNext() {
-  const total = state.present?.slides.length || slideCount();
-  if (state.current < total - 1) {
-    state.current++;
-    renderPresent();
-    if (state.mode === 'edit') store.setSlide(state.current);
-    renderAll();
+  presentGo(1);
+}
+function presentPrev() {
+  presentGo(-1);
+}
+
+// ---------- Slide transitions ----------
+
+/** Build the [from, to] keyframe pairs for the outgoing and incoming layers of a slide transition. */
+function transitionConfig(type: string, sign: number): { prev: [any, any]; next: [any, any] } {
+  const off = 100 * sign; // % offset for directional moves
+  switch (type) {
+    case 'fade':
+      return {
+        prev: [{ opacity: 1 }, { opacity: 0 }],
+        next: [{ opacity: 0 }, { opacity: 1 }]
+      };
+    case 'zoom':
+      return {
+        prev: [{ opacity: 1, transform: 'scale(1)' }, { opacity: 0, transform: 'scale(1.1)' }],
+        next: [{ opacity: 0, transform: 'scale(0.9)' }, { opacity: 1, transform: 'scale(1)' }]
+      };
+    case 'push':
+      return {
+        prev: [{ transform: 'translateX(0)' }, { transform: `translateX(${-off}%)` }],
+        next: [{ transform: `translateX(${off}%)` }, { transform: 'translateX(0)' }]
+      };
+    case 'cover':
+      return {
+        prev: [{ transform: 'translateX(0)' }, { transform: 'translateX(0)' }],
+        next: [{ transform: `translateX(${off}%)` }, { transform: 'translateX(0)' }]
+      };
+    case 'fly':
+      return {
+        prev: [{ opacity: 1, transform: 'translateX(0)' }, { opacity: 1, transform: 'translateX(0)' }],
+        next: [{ opacity: 0, transform: `translateX(${off}%)` }, { opacity: 1, transform: 'translateX(0)' }]
+      };
+    // wipe / reveal reduce to a directional clip reveal. blinds / split / randomBar are
+    // handled separately by playBandTransition (see renderPresent) for a distinct effect.
+    case 'wipe':
+    case 'reveal':
+    default: {
+      const clipFrom = sign > 0 ? 'inset(0 100% 0 0)' : 'inset(0 0 0 100%)';
+      return {
+        prev: [{ transform: 'translateX(0)' }, { transform: 'translateX(0)' }],
+        next: [{ opacity: 1, clipPath: clipFrom }, { opacity: 1, clipPath: 'inset(0 0 0 0)' }]
+      };
+    }
+  }
+}
+
+/** Animate the outgoing + incoming layers for a slide transition. */
+function playSlideTransition(prev: HTMLElement, next: HTMLElement, trans: any, dir: number): void {
+  const cfg = transitionConfig(trans.type, dir >= 0 ? 1 : -1);
+  const d = trans.duration || 800;
+  const apply = (el: HTMLElement, frame: any) => {
+    if (frame.transform != null) el.style.transform = frame.transform;
+    if (frame.opacity != null) el.style.opacity = String(frame.opacity);
+    if (frame.clipPath != null) el.style.clipPath = frame.clipPath;
+  };
+  apply(prev, cfg.prev[0]);
+  apply(next, cfg.next[0]);
+  const a1 = prev.animate(cfg.prev, { duration: d, easing: 'ease', fill: 'both' });
+  const a2 = next.animate(cfg.next, { duration: d, easing: 'ease', fill: 'both' });
+  const clear = (el: HTMLElement) => {
+    el.style.transform = '';
+    el.style.opacity = '';
+    el.style.clipPath = '';
+  };
+  a1.onfinish = () => clear(prev);
+  a2.onfinish = () => clear(next);
+}
+
+/**
+ * Distinct slide transitions built from horizontal slats of the outgoing slide:
+ *  - `blinds`    (百叶窗): N slats collapsing to reveal the incoming slide — the classic venetian-blind.
+ *  - `split`     (分割):    two halves sliding apart (up/down) to reveal the incoming slide.
+ *  - `randomBar` (随机条):  N slats collapsing with random per-slat delays.
+ * The incoming slide (`next`) sits underneath; an overlay of clipped copies of `prev` is stacked on
+ * top and animated away. `prev` is hidden (display:none) for the duration and removed by the caller.
+ * The overlay removes itself once its longest animation ends.
+ */
+function playBandTransition(prev: HTMLElement, next: HTMLElement, trans: any, dir: number): HTMLElement {
+  const type: string = trans.type;
+  const d: number = trans.duration || 800;
+  const N = type === 'split' ? 2 : type === 'randomBar' ? 12 : 8;
+  const sz: any = (store.doc && store.doc.slideSize) || state.slideSize || { width: 960, height: 540 };
+  const W: number = sz.width;
+  const H: number = sz.height;
+
+  prev.style.display = 'none';
+  const overlay = h('div', { class: 'present-blinds' });
+  overlay.style.position = 'absolute';
+  overlay.style.inset = '0';
+  overlay.style.zIndex = '3';
+  overlay.style.overflow = 'hidden';
+  overlay.style.pointerEvents = 'none';
+
+  const bands: HTMLElement[] = [];
+  for (let i = 0; i < N; i++) {
+    const band = document.createElement('div');
+    band.style.position = 'absolute';
+    band.style.overflow = 'hidden';
+    band.style.left = '0';
+    band.style.width = '100%';
+    band.style.height = H / N + 'px';
+    band.style.top = (i * H) / N + 'px';
+
+    const clone = prev.cloneNode(true) as HTMLElement;
+    clone.className = '';
+    clone.style.position = 'absolute';
+    clone.style.margin = '0';
+    clone.style.left = '0';
+    clone.style.top = (-(i * H) / N) + 'px';
+    clone.style.width = W + 'px';
+    clone.style.height = H + 'px';
+    clone.style.transform = '';
+    clone.style.opacity = '';
+    clone.style.clipPath = '';
+
+    band.appendChild(clone);
+    overlay.appendChild(band);
+    bands.push(band);
+  }
+  presentHostEl.appendChild(overlay);
+
+  let maxEnd = d;
+  for (let i = 0; i < N; i++) {
+    const band = bands[i];
+    let anim: Keyframe[];
+    if (type === 'split') {
+      anim = i === 0
+        ? [{ transform: 'translateY(0)' }, { transform: 'translateY(-100%)' }]
+        : [{ transform: 'translateY(0)' }, { transform: 'translateY(100%)' }];
+    } else {
+      band.style.transformOrigin = type === 'randomBar' && Math.random() < 0.5 ? 'bottom' : 'top';
+      anim = [{ transform: 'scaleY(1)' }, { transform: 'scaleY(0)' }];
+    }
+    const delay = type === 'randomBar' ? Math.random() * d * 0.6 : 0;
+    const end = d + delay;
+    if (end > maxEnd) maxEnd = end;
+    band.animate(anim, { duration: d, delay, easing: 'ease-in-out', fill: 'both' });
+  }
+  setTimeout(() => {
+    if (overlay.parentNode === presentHostEl) overlay.remove();
+  }, maxEnd + 60);
+  return overlay;
+}
+
+// ---------- Element entrance animations ----------
+
+interface EntranceFrames {
+  from: { opacity?: number; transform?: string; clipPath?: string };
+  mid?: { opacity?: number; transform?: string; clipPath?: string };
+  to: { opacity?: number; transform?: string; clipPath?: string };
+}
+
+/** Map an animation record to its [from, to] keyframes (for the `entr`/`exit`/`emph` classes). */
+function entranceKeyframes(a: any): EntranceFrames {
+  const dir = a.direction || 'l';
+  const dist = 80; // px
+  // direction → offset / clip edge
+  const move: Record<string, string> = {
+    l: `translateX(${-dist}px)`,
+    r: `translateX(${dist}px)`,
+    t: `translateY(${-dist}px)`,
+    b: `translateY(${dist}px)`
+  };
+  const clipFrom: Record<string, string> = {
+    l: 'inset(0 0 0 100%)', // reveal expands rightward (comes from left)
+    r: 'inset(0 100% 0 0)', // reveal expands leftward
+    t: 'inset(100% 0 0 0)',
+    b: 'inset(0 0 100% 0)'
+  };
+  let from: EntranceFrames['from'] = { opacity: 0 };
+  let to: EntranceFrames['to'] = { opacity: 1 };
+  const type = a.type || 'fadeIn';
+  if (a.presetClass === 'exit') {
+    // reverse: visible → hidden
+    from = { opacity: 1 };
+    to = { opacity: 0 };
+    if (type === 'flyOut' || type.startsWith('fly')) to.transform = move[dir];
+    else if (type.startsWith('wipe')) to.clipPath = clipFrom[dir];
+    else if (type === 'zoomOut') to.transform = 'scale(0.3)';
+    else to.transform = move[dir];
+  } else if (a.presetClass === 'emph') {
+    // pulse: normal → enlarged → normal (smooth, no snap-back)
+    from = { opacity: 1, transform: 'scale(1)' };
+    to = { opacity: 1, transform: 'scale(1.12)' };
+    if (type === 'pulse') {
+      return {
+        from: { opacity: 1, transform: 'scale(1)' },
+        mid: { opacity: 1, transform: 'scale(1.12)' },
+        to: { opacity: 1, transform: 'scale(1)' }
+      };
+    }
   } else {
-    presentEl.className = 'present';
-    disposeStaleCharts();
+    // entrance
+    switch (type) {
+      case 'flyIn':
+        from = { opacity: 0, transform: move[dir] };
+        break;
+      case 'wipeIn':
+        from = { opacity: 1, clipPath: clipFrom[dir] };
+        break;
+      case 'zoomIn':
+        from = { opacity: 0, transform: 'scale(0.3)' };
+        break;
+      case 'riseUp':
+        from = { opacity: 0, transform: 'translateY(60px)' };
+        break;
+      case 'fadeIn':
+      default:
+        from = { opacity: 0 };
+        break;
+    }
+  }
+  return { from, to };
+}
+
+/** Play one element entrance animation and clear inline styles when done. */
+function playEntrance(node: HTMLElement, kf: EntranceFrames, opts: KeyframeAnimationOptions): void {
+  const base = {
+    opacity: kf.from.opacity ?? 1,
+    transform: kf.from.transform ?? 'none',
+    clipPath: kf.from.clipPath ?? 'none'
+  };
+  const end = {
+    opacity: kf.to.opacity ?? 1,
+    transform: kf.to.transform ?? 'none',
+    clipPath: kf.to.clipPath ?? 'none'
+  };
+  const frames: Keyframe[] = [{ ...base, offset: 0 }];
+  if (kf.mid) {
+    frames.push({
+      opacity: kf.mid.opacity ?? 1,
+      transform: kf.mid.transform ?? 'none',
+      clipPath: kf.mid.clipPath ?? 'none',
+      offset: 0.5
+    });
+  }
+  frames.push({ ...end, offset: 1 });
+  const anim = node.animate(frames, opts);
+  anim.onfinish = () => {
+    node.style.opacity = '';
+    node.style.transform = '';
+    node.style.clipPath = '';
+  };
+}
+
+/**
+ * Set up a slide's element entrance animations. Auto-triggered animations (`afterPrev`, `withPrev`)
+ * play in sequence (with a shared start delay for `withPrev`); `onClick` animations stay hidden and
+ * are stepped by `presentClick`.
+ */
+function applyEntranceAnimations(layer: HTMLElement, slide: any): void {
+  presentClickAnims = [];
+  presentClickIdx = 0;
+  const anims: any[] = Array.isArray(slide.animations) ? slide.animations : [];
+  if (!anims.length) return;
+  let cum = 0;
+  for (const a of anims) {
+    const targetId = String(a.target ?? '').replace(/"/g, '\\"');
+    const node = targetId ? (layer.querySelector(`[data-id="${targetId}"]`) as HTMLElement | null) : null;
+    if (!node) continue;
+    const kf = entranceKeyframes(a);
+    // prime the hidden/start state before the layer becomes visible (no flash)
+    node.style.opacity = String(kf.from.opacity ?? 1);
+    if (kf.from.transform) node.style.transform = kf.from.transform;
+    if (kf.from.clipPath) node.style.clipPath = kf.from.clipPath;
+    const opts: KeyframeAnimationOptions = { duration: a.duration || 500, easing: 'ease', fill: 'both' };
+    const trigger = a.trigger || 'afterPrev';
+    if (trigger === 'onClick') {
+      presentClickAnims.push({ node, kf, opts, cls: a.presetClass || 'entr' });
+    } else {
+      playEntrance(node, kf, { ...opts, delay: cum });
+      if (trigger !== 'withPrev') cum += a.duration || 500;
+    }
   }
 }
 
 // ---------- Context menu ----------
 function showCtxMenu(x: number, y: number) {
-  const items: { label: string; disabled?: boolean; onClick?: () => void }[] = [];
+  const items: MenuItem[] = [];
   if (state.mode === 'edit') {
     const hasSel = store.sel.length > 0;
     items.push(
-      { label: 'Bring Front', disabled: !hasSel, onClick: () => runAction(() => actions.zOrder('front')) },
-      { label: 'Send Back', disabled: !hasSel, onClick: () => runAction(() => actions.zOrder('back')) },
-      { label: 'Copy', disabled: !hasSel, onClick: () => { actions.copySelected(false); toast('Copied'); } },
-      { label: 'Cut', disabled: !hasSel, onClick: () => { actions.copySelected(true); toast('Cut'); } },
-      { label: 'Paste', onClick: () => runAction(() => actions.paste()) },
-      { label: 'Duplicate', disabled: !hasSel, onClick: () => runAction(() => actions.duplicateSelected()) },
-      { label: 'Delete', disabled: !hasSel, onClick: () => runAction(() => actions.deleteSelected()) },
-      { label: '', onClick: () => {} },
-      { label: store.selected().some((el: any) => el.locked) ? 'Unlock' : 'Lock', disabled: !hasSel, onClick: () => runAction(() => actions.toggleLock()) },
-      { label: 'Select All', onClick: () => { actions.selectAll(); renderAll(); } },
-      { label: '', onClick: () => {} },
-      { label: 'Group', disabled: store.sel.length < 2, onClick: () => runAction(() => actions.groupSelection()) },
-      { label: 'Ungroup', onClick: () => runAction(() => actions.ungroupSelection()) }
+      { label: t('menu.bringFront'), icon: 'zFront', disabled: !hasSel, onClick: () => runAction(() => actions.zOrder('front')) },
+      { label: t('menu.sendBack'), icon: 'zBack', disabled: !hasSel, onClick: () => runAction(() => actions.zOrder('back')) },
+      { type: 'sep' },
+      { label: t('menu.cut'), icon: 'cut', accel: kbd('mod+x'), disabled: !hasSel, onClick: () => { actions.copySelected(true); toast(t('toast.cut')); } },
+      { label: t('menu.copy'), icon: 'copy', accel: kbd('mod+c'), disabled: !hasSel, onClick: () => { actions.copySelected(false); toast(t('toast.copied')); } },
+      { label: t('menu.paste'), icon: 'paste', accel: kbd('mod+v'), onClick: () => runAction(() => actions.paste()) },
+      { type: 'sep' },
+      { label: t('menu.duplicate'), icon: 'duplicate', accel: kbd('mod+d'), disabled: !hasSel, onClick: () => runAction(() => actions.duplicateSelected()) },
+      { label: t('menu.delete'), icon: 'deleteSlide', accel: kbd('del'), disabled: !hasSel, onClick: () => runAction(() => actions.deleteSelected()) },
+      { type: 'sep' },
+      { label: store.selected().some((el: any) => el.locked) ? t('menu.unlock') : t('menu.lock'), icon: 'lock', disabled: !hasSel, onClick: () => runAction(() => actions.toggleLock()) },
+      { label: t('cmd.selectAll'), icon: 'selectAll', accel: kbd('mod+a'), onClick: () => { actions.selectAll(); renderAll(); } },
+      { type: 'sep' },
+      { label: t('menu.group'), icon: 'group', accel: kbd('mod+g'), disabled: store.sel.length < 2, onClick: () => runAction(() => actions.groupSelection()) },
+      { label: t('menu.ungroup'), icon: 'ungroup', accel: kbd('mod+shift+g'), onClick: () => runAction(() => actions.ungroupSelection()) }
     );
   } else {
     items.push(
-      { label: 'Edit', onClick: () => toggleMode() },
-      { label: 'Document Properties', onClick: () => toggleDocInfo() }
+      { label: t('menu.editMode'), icon: 'edit', onClick: () => setMode('edit') },
+      { type: 'sep' },
+      { label: t('cmd.present'), icon: 'present', accel: kbd('f5'), onClick: () => startPresent(false) },
+      { label: t('menu.docProps'), icon: 'props', onClick: () => toggleDocInfo() }
     );
   }
-  openCtxMenu(x, y, items);
+  openMenu(items, x, y);
 }
 
 function showSlideCtxMenu(x: number, y: number, idx: number) {
   const count = slideCount();
-  const slide = store.doc.slides[idx];
-  const items: { label: string; disabled?: boolean; onClick?: () => void }[] = [
-    { label: 'New slide after', onClick: () => runAction(() => { const n = store.slideCount; actions.addSlide(); actions.moveSlide(n, idx + 1); }) },
-    { label: 'Duplicate slide', onClick: () => runAction(() => actions.duplicateSlide(idx)) },
-    { label: '', onClick: () => {} },
-    { label: 'Move up', disabled: idx <= 0, onClick: () => runAction(() => actions.moveSlide(idx, idx - 1)) },
-    { label: 'Move down', disabled: idx >= count - 1, onClick: () => runAction(() => actions.moveSlide(idx, idx + 1)) },
-    { label: slide?.hidden ? 'Show slide' : 'Hide slide', onClick: () => runAction(() => actions.toggleSlideHidden(idx)) },
-    { label: '', onClick: () => {} },
-    { label: 'Delete slide', disabled: count <= 1, onClick: () => runAction(() => actions.deleteSlide(idx)) }
+  const editing = state.mode === 'edit';
+  const slide = editing ? store.doc.slides[idx] : null;
+  const items: MenuItem[] = [
+    { label: t('menu.slide.newAfter'), icon: 'newSlide', onClick: () => runAction(() => { const n = store.slideCount; actions.addSlide(); actions.moveSlide(n, idx + 1); }) },
+    { label: t('menu.slide.duplicate'), icon: 'duplicateSlide', onClick: () => runAction(() => actions.duplicateSlide(idx)) },
+    { type: 'sep' },
+    { label: t('menu.slide.moveUp'), icon: 'up', disabled: idx <= 0, onClick: () => runAction(() => actions.moveSlide(idx, idx - 1)) },
+    { label: t('menu.slide.moveDown'), icon: 'down', disabled: idx >= count - 1, onClick: () => runAction(() => actions.moveSlide(idx, idx + 1)) },
+    { label: slide?.hidden ? t('menu.slide.show') : t('menu.slide.hide'), icon: slide?.hidden ? 'showSlide' : 'hideSlide', onClick: () => runAction(() => actions.toggleSlideHidden(idx)) },
+    { type: 'sep' },
+    { label: t('menu.slide.delete'), icon: 'deleteSlide', disabled: count <= 1, onClick: () => { state.current = idx; void deleteCurrentSlide(); } }
   ];
-  openCtxMenu(x, y, items);
-}
-
-function openCtxMenu(x: number, y: number, items: { label: string; disabled?: boolean; onClick?: () => void }[]) {
-  ctxMenuEl.innerHTML = '';
-  for (const it of items) {
-    if (!it.label) {
-      ctxMenuEl.append(h('div', { class: 'ctx-sep' }));
-      continue;
-    }
-    const node = h('div', { class: 'ctx-item' + (it.disabled ? ' disabled' : '') }, [it.label]);
-    if (!it.disabled) node.addEventListener('click', () => { hideCtxMenu(); it.onClick?.(); });
-    ctxMenuEl.append(node);
-  }
-  ctxMenuEl.classList.add('on');
-  ctxMenuEl.style.left = Math.min(x, window.innerWidth - 200) + 'px';
-  ctxMenuEl.style.top = Math.min(y, window.innerHeight - 300) + 'px';
-}
-function hideCtxMenu() {
-  ctxMenuEl.classList.remove('on');
+  openMenu(items, x, y);
 }
 
 // ---------- Keyboard ----------
 function onKeyDown(e: KeyboardEvent) {
   const target = e.target as HTMLElement;
-  const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+  // SELECT matters now that the ribbon lives above the canvas: arrow keys must still nudge a
+  // selection, not scroll an open dropdown.
+  const typing =
+    target &&
+    (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable);
+  // An open popup menu owns Esc / ↑ ↓ / ↵ — checked first so Esc closes the menu rather than
+  // falling through to "cancel the current selection".
+  if (popupKeydown(e)) return;
   if (e.key === 'Escape' && hasOpenModal()) {
     closeModal();
     return;
   }
   if (e.key === 'Escape') {
     if (presentEl.classList.contains('on')) {
-      presentEl.className = 'present';
-      disposeStaleCharts();
+      stopPresent();
       return;
     }
     if (store.groupEdit) {
@@ -2301,17 +3186,37 @@ function onKeyDown(e: KeyboardEvent) {
       store.setSel([]);
       renderSelection();
       renderInspector();
+      ribbon.sync(ribbonState());
     }
     return;
   }
   if (typing) return;
   if (e.key === 'F5') {
     e.preventDefault();
-    startPresent();
+    startPresent(e.shiftKey);
     return;
   }
   if (presentEl.classList.contains('on')) {
-    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') presentNext();
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') presentClick();
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'PageUp') presentPrev();
+    return;
+  }
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && !e.altKey) {
+    const k = e.key.toLowerCase();
+    if (k === 'b' || k === 'i' || k === 'u') {
+      if (state.mode !== 'edit') return;
+      e.preventDefault();
+      const one = store.sel.length === 1 ? store.findElement(store.sel[0]) : null;
+      if (!one) return;
+      const patch = k === 'b' ? { bold: !one.bold } : k === 'i' ? { italic: !one.italic } : { underline: !one.underline };
+      runAction(() => actions.applyTextStyleSel(patch));
+      return;
+    }
+  }
+  if (e.key === '?') {
+    e.preventDefault();
+    openShortcuts();
     return;
   }
   if (state.mode !== 'edit') return;
@@ -2323,7 +3228,6 @@ function onKeyDown(e: KeyboardEvent) {
     syncSoon();
     return;
   }
-  const mod = e.ctrlKey || e.metaKey;
   if (mod && e.key.toLowerCase() === 'z') {
     e.preventDefault();
     runAction(() => (e.shiftKey ? store.redo() : store.undo()));
@@ -2420,19 +3324,32 @@ window.addEventListener('message', async (event: MessageEvent<HostToWebview>) =>
         state.latest = toBytes(msg.bytes);
         state.title = msg.title || state.title;
         state.mode = msg.mode === 'edit' ? 'edit' : 'preview';
+        state.dirty = msg.dirty;
+        // `<html lang>` already set the locale at startup; honour the host's value as
+        // authoritative and refresh every baked-in label if it differs.
+        if (msg.locale && setLocale(msg.locale)) applyLocale();
         state.version++;
         await renderPreview();
-        applyMode();
+        await applyMode();
+        syncChrome();
         break;
       }
       case 'bytes': {
         state.latest = toBytes(msg.bytes);
+        state.dirty = msg.dirty;
         state.version++;
         if (state.mode === 'preview') await renderPreview();
+        syncChrome();
         break;
       }
       case 'saved':
-        toast('Saved');
+        state.dirty = false;
+        syncChrome();
+        toast(t('toast.saved'));
+        break;
+      case 'reverted':
+        state.dirty = false;
+        syncChrome();
         break;
       case 'info':
         toast(msg.message, msg.kind || 'info');
@@ -2440,7 +3357,7 @@ window.addEventListener('message', async (event: MessageEvent<HostToWebview>) =>
     }
   } catch (e: any) {
     console.error('[pptx-webview] Message failed:', e);
-    toast('Failed: ' + (e?.message || String(e)), 'error');
+    toast(t('toast.renderFailed', e?.message || String(e)), 'error');
   }
 });
 
@@ -2449,6 +3366,9 @@ async function main() {
   const style = document.createElement('style');
   style.textContent = CSS;
   document.head.append(style);
+  // Follow VS Code's display language. The host writes it into <html lang> before this runs
+  // (so there is no flash of English); `init` carries it again as the authoritative value.
+  setLocale(document.documentElement.lang);
   buildLayout();
   post({ type: 'ready' });
 }

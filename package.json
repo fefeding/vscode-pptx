@@ -2,7 +2,7 @@
   "name": "vscode-pptx",
   "displayName": "PPTX Editor",
   "description": "VSCode PPTX preview and editor extension powered by pptx-parser (default handler for .pptx)",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "publisher": "fefeding",
   "license": "MIT",
   "repository": {
@@ -12,6 +12,7 @@
   "engines": {
     "vscode": "^1.75.0"
   },
+  "l10n": "./l10n",
   "categories": [
     "Other",
     "Visualization"
@@ -46,11 +47,11 @@
     "commands": [
       {
         "command": "pptx-parser.revert",
-        "title": "PPTX: Discard Changes and Reload"
+        "title": "%command.revert%"
       },
       {
         "command": "pptx-parser.exportCopy",
-        "title": "PPTX: Export Copy..."
+        "title": "%command.exportCopy%"
       }
     ],
     "menus": {
@@ -78,7 +79,7 @@
     "publish": "vsce publish"
   },
   "dependencies": {
-    "@fefeding/ppt-parser": "^1.0.23",
+    "@fefeding/ppt-parser": "^1.0.25",
     "jszip": "^3.10.2",
     "tinycolor2": "^1.6.0"
   },

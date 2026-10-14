@@ -1,0 +1,9 @@
+{
+  "extension.saved": "Saved",
+  "extension.reloaded": "Reloaded",
+  "extension.initFailed": "Initialization failed: {0}",
+  "extension.exportCopy": "Export Copy",
+  "extension.exported": "Exported copy: {0}",
+  "command.revert": "PPTX: Discard Changes and Reload",
+  "command.exportCopy": "PPTX: Export Copy..."
+}

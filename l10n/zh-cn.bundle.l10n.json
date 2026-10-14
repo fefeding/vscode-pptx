@@ -1,0 +1,9 @@
+{
+  "extension.saved": "已保存",
+  "extension.reloaded": "已重新加载",
+  "extension.initFailed": "初始化失败：{0}",
+  "extension.exportCopy": "导出副本",
+  "extension.exported": "已导出副本：{0}",
+  "command.revert": "PPTX：放弃更改并重新加载",
+  "command.exportCopy": "PPTX：导出副本…"
+}

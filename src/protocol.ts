@@ -26,14 +26,22 @@ export type WebviewToHost =
 /** Host → Webview */
 export type HostToWebview =
   | {
-      type: 'init';
-      mode: EditorMode;
-      /** Original file bytes (base64) — preview mode renders these faithfully. */
-      originalBytes: string;
-      /** Latest bytes (base64); equals originalBytes until the webview reports an edit. */
-      bytes: string;
-      title: string;
-    }
+    type: 'init';
+    mode: EditorMode;
+    /** Original file bytes (base64) — preview mode renders these faithfully. */
+    originalBytes: string;
+    /** Latest bytes (base64); equals originalBytes until the webview reports an edit. */
+    bytes: string;
+    title: string;
+    /** True when the document has unsaved changes (drives the webview's dirty dot). */
+    dirty: boolean;
+    /**
+     * VS Code display language (e.g. `zh-cn`, `en`). The webview also reads `<html lang>`,
+     * which the host fills with the same value; this field is the authoritative fallback.
+     */
+    locale: string;
+  }
   | { type: 'bytes'; bytes: string; dirty: boolean }
   | { type: 'saved' }
+  | { type: 'reverted' }
   | { type: 'info'; message: string; kind?: 'info' | 'warn' | 'error' };

@@ -4,6 +4,15 @@ import type { HostToWebview, WebviewToHost } from './protocol';
 
 const VIEW_TYPE = 'pptx-parser.pptxEditor';
 
+/**
+ * Localized host-side string. `vscode.l10n.t` echoes the key back when no bundle is installed
+ * (or the locale is untranslated), so the English fallback is kept as a second argument.
+ */
+function loc(key: string, fallback: string, ...args: string[]): string {
+  const value = vscode.l10n.t(key, ...args);
+  return !value || value === key ? fallback.replace('{0}', args[0] ?? '') : value;
+}
+
 function getNonce(): string {
   let text = '';
   const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -64,9 +73,20 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
         mode: s.mode,
         originalBytes: s.originalBytes,
         bytes: s.bytes,
-        title: document.uri.path.split('/').pop() || 'presentation.pptx'
+        title: document.uri.path.split('/').pop() || 'presentation.pptx',
+        dirty: document.isDirty,
+        locale: vscode.env.language
       });
     };
+
+    // Surface the host's real dirty state so the webview's dot matches VS Code's own save/revert.
+    // The webview no longer implements saving (VS Code handles Ctrl+S / File › Save), so the
+    // authoritative dirty flag lives here and is pushed down on every change.
+    document.onDidSave(() => send({ type: 'saved' }));
+    document.onDidRevert(() => {
+      void sendInit();
+      send({ type: 'reverted' });
+    });
 
     // Register listener before sending, so the webview never misses a message if the host throws
     webviewPanel.webview.onDidReceiveMessage(async (message: WebviewToHost) => {
@@ -83,9 +103,9 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
             document.setDirty(message.dirty);
             break;
           case 'save':
+            // Saving is owned by VS Code; this path is only kept for completeness. The actual
+            // dirty-state notification is pushed via the document's onDidSave listener above.
             await document.save();
-            send({ type: 'saved' });
-            send({ type: 'info', kind: 'info', message: 'Saved' });
             break;
           case 'saveAs':
             await this.saveAs(document, message.bytes);
@@ -93,7 +113,7 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
           case 'revert':
             await document.revert();
             await sendInit();
-            send({ type: 'info', kind: 'info', message: 'Reloaded' });
+            send({ type: 'info', kind: 'info', message: loc('extension.reloaded', 'Reloaded') });
             break;
           case 'error':
             send({ type: 'info', kind: 'error', message: message.message });
@@ -108,7 +128,7 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     try {
       await sendInit();
     } catch (err: any) {
-      send({ type: 'info', kind: 'error', message: 'Initialization failed: ' + (err?.message || String(err)) });
+      send({ type: 'info', kind: 'error', message: loc('extension.initFailed', 'Initialization failed: {0}', String(err?.message || err)) });
     }
   }
 
@@ -146,7 +166,7 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
   private async saveAs(document: PptxCustomDocument, bytes?: string | null): Promise<void> {
     const uri = await vscode.window.showSaveDialog({
       defaultUri: document.uri,
-      saveLabel: 'Export Copy',
+      saveLabel: loc('extension.exportCopy', 'Export Copy'),
       filters: { 'PowerPoint': ['pptx'] }
     });
     if (!uri) return;
@@ -154,7 +174,7 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     // targetUri intentionally leaves the dirty flag untouched)
     if (bytes) document.setBytes(bytes);
     await document.save(uri);
-    vscode.window.showInformationMessage(`Exported copy: ${uri.fsPath}`);
+    vscode.window.showInformationMessage(loc('extension.exported', 'Exported copy: {0}', uri.fsPath));
   }
 
   public async revertActive(): Promise<void> {
@@ -188,7 +208,7 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
       `script-src 'nonce-${nonce}' 'unsafe-eval' ${webview.cspSource};`
     ].join(' ');
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${vscode.env.language}">
 <head>
 <meta charset="utf-8" />
 <meta http-equiv="Content-Security-Policy" content="${csp}" />
