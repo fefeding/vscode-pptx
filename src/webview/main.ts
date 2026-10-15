@@ -2310,85 +2310,75 @@ function renderElementInspector(el: any) {
   // Default trigger is 'afterPrev' (auto-play when the slide appears) so a freshly added
   // animation is actually visible during the slideshow without requiring a click first.
   const pick = { cls: 'entr', type: (ANIM_TYPES.entr[0] || {}).value, trigger: 'afterPrev', direction: (ANIM_DIRECTIONS[0] || {}).value, duration: 500 };
-  const typeWrap = h('div', {});
-  const renderTypes = () => {
-    typeWrap.innerHTML = '';
-    typeWrap.append(
+  const addAnim = () =>
+    runAction(() =>
+      actions.addAnimation({
+        target: el.id,
+        type: pick.type,
+        presetClass: pick.cls,
+        direction: pick.direction,
+        duration: pick.duration,
+        trigger: pick.trigger
+      })
+    );
+  // Single-click add: the button always adds an animation immediately (no hidden two-step form).
+  const addButton = () =>
+    h('div', { class: 'row' }, [
+      h('button', { class: 'btn', type: 'button', title: t('insp.animAdd'), onclick: addAnim }, ['＋ ' + t('insp.animAdd')])
+    ]);
+  if (!mine.length) {
+    // Element has no animation yet: keep the panel minimal — one button that adds a default
+    // animation in a single click. The configuration controls below only appear once the
+    // element actually has an animation (the inspector re-renders right after adding), so
+    // elements without animations don't show options that don't apply to them.
+    inspectorEl.append(addButton());
+  } else {
+    // Animation list exists: also show the configuration controls, so the next animation can
+    // be added with different options (class / type / trigger / direction / duration).
+    const typeWrap = h('div', {});
+    const renderTypes = () => {
+      typeWrap.innerHTML = '';
+      typeWrap.append(
+        selectField(
+          t('insp.animType'),
+          (ANIM_TYPES[pick.cls] || []).map((x: any) => ({ value: x.value, label: data('animType', x.value, x.name) })),
+          pick.type,
+          (v) => (pick.type = v)
+        )
+      );
+    };
+    renderTypes();
+    inspectorEl.append(
       selectField(
-        t('insp.animType'),
-        (ANIM_TYPES[pick.cls] || []).map((x: any) => ({ value: x.value, label: data('animType', x.value, x.name) })),
-        pick.type,
-        (v) => (pick.type = v)
+        t('insp.animClass'),
+        ANIM_CLASSES.map((c: any) => ({ value: c.value, label: data('animClass', c.value, c.name) })),
+        pick.cls,
+        (v) => {
+          pick.cls = v;
+          renderTypes();
+        }
       )
     );
-  };
-  renderTypes();
-
-  // The "choose animation" form is hidden by default — it is only shown once the user
-  // explicitly clicks "add animation", so elements without animations don't show the
-  // configuration controls they don't (yet) need.
-  const formWrap = h('div', { class: 'anim-add-form' });
-  formWrap.style.display = 'none';
-  formWrap.append(
-    selectField(
-      t('insp.animClass'),
-      ANIM_CLASSES.map((c: any) => ({ value: c.value, label: data('animClass', c.value, c.name) })),
-      pick.cls,
-      (v) => {
-        pick.cls = v;
-        renderTypes();
-      }
-    )
-  );
-  formWrap.append(typeWrap);
-  formWrap.append(
-    selectField(
-      t('insp.animTrigger'),
-      ['onClick', 'withPrev', 'afterPrev'].map((v) => ({ value: v, label: data('trigger', v, v) })),
-      pick.trigger,
-      (v) => (pick.trigger = v)
-    )
-  );
-  formWrap.append(
-    selectField(
-      t('insp.animDirection'),
-      ANIM_DIRECTIONS.map((d: any) => ({ value: d.value, label: data('animDir', d.value, d.name) })),
-      pick.direction,
-      (v) => (pick.direction = v)
-    )
-  );
-  formWrap.append(numField(t('insp.animDuration'), pick.duration, (v) => (pick.duration = Math.max(0, Math.round(v)))));
-  formWrap.append(
-    h('div', { class: 'row' }, [
-      h('button', {
-        class: 'btn',
-        type: 'button',
-        onclick: () =>
-          runAction(() =>
-            actions.addAnimation({
-              target: el.id,
-              type: pick.type,
-              presetClass: pick.cls,
-              direction: pick.direction,
-              duration: pick.duration,
-              trigger: pick.trigger
-            })
-          )
-      }, ['+ ' + t('insp.animAdd')])
-    ])
-  );
-  // Toggle button: reveals the hidden add-animation form above.
-  inspectorEl.append(
-    h('div', { class: 'row' }, [
-      h('button', {
-        class: 'btn',
-        type: 'button',
-        title: t('insp.animAdd'),
-        onclick: () => { formWrap.style.display = formWrap.style.display === 'none' ? '' : 'none'; }
-      }, ['＋ ' + t('insp.animAdd')])
-    ])
-  );
-  inspectorEl.append(formWrap);
+    inspectorEl.append(typeWrap);
+    inspectorEl.append(
+      selectField(
+        t('insp.animTrigger'),
+        ['onClick', 'withPrev', 'afterPrev'].map((v) => ({ value: v, label: data('trigger', v, v) })),
+        pick.trigger,
+        (v) => (pick.trigger = v)
+      )
+    );
+    inspectorEl.append(
+      selectField(
+        t('insp.animDirection'),
+        ANIM_DIRECTIONS.map((d: any) => ({ value: d.value, label: data('animDir', d.value, d.name) })),
+        pick.direction,
+        (v) => (pick.direction = v)
+      )
+    );
+    inspectorEl.append(numField(t('insp.animDuration'), pick.duration, (v) => (pick.duration = Math.max(0, Math.round(v)))));
+    inspectorEl.append(addButton());
+  }
 }
 
 // ---------- Field builders ----------
@@ -2932,6 +2922,11 @@ function playBandTransition(prev: HTMLElement, next: HTMLElement, trans: any, di
 
     const clone = prev.cloneNode(true) as HTMLElement;
     clone.className = '';
+    // `prev` was already set to `display:none` (line above) before cloning, so the clone inherits
+    // it and would stay invisible — clearing it here is what actually makes each slat show the
+    // outgoing slide. Without this, blinds / split / randomBar transitions render nothing and the
+    // incoming slide just pops in with no effect.
+    clone.style.display = '';
     clone.style.position = 'absolute';
     clone.style.margin = '0';
     clone.style.left = '0';
@@ -2973,13 +2968,34 @@ function playBandTransition(prev: HTMLElement, next: HTMLElement, trans: any, di
 
 // ---------- Element entrance animations ----------
 
-interface EntranceFrames {
-  from: { opacity?: number; transform?: string; clipPath?: string };
-  mid?: { opacity?: number; transform?: string; clipPath?: string };
-  to: { opacity?: number; transform?: string; clipPath?: string };
+interface EntranceFrame {
+  opacity?: number;
+  transform?: string;
+  clipPath?: string;
+  offset?: number;
 }
 
-/** Map an animation record to its [from, to] keyframes (for the `entr`/`exit`/`emph` classes). */
+/**
+ * Full keyframe list for one element animation. `frames` is what actually plays; its first entry
+ * doubles as the pre-animation "hidden" state primed by applyEntranceAnimations, so there is no
+ * flash between slide paint and animation start. Multi-step effects (bounce / shake / flash) need
+ * more than a [from, to] pair, hence a list with explicit offsets.
+ */
+interface EntranceFrames {
+  frames: EntranceFrame[];
+}
+
+/**
+ * Normalize an animation duration to milliseconds. The editor stores milliseconds (default 500),
+ * but animations round-tripped through PPTX come back in seconds (e.g. 0.5), which would otherwise
+ * produce an imperceptible 0.5ms animation. Anything below 20 is treated as seconds.
+ */
+function animDurationMs(d: any): number {
+  const v = typeof d === 'number' && d > 0 ? d : 500;
+  return Math.round(v < 20 ? v * 1000 : v);
+}
+
+/** Map an animation record to its keyframes (for the `entr`/`exit`/`emph` classes). */
 function entranceKeyframes(a: any): EntranceFrames {
   const dir = a.direction || 'l';
   const dist = 80; // px
@@ -2996,74 +3012,119 @@ function entranceKeyframes(a: any): EntranceFrames {
     t: 'inset(100% 0 0 0)',
     b: 'inset(0 0 100% 0)'
   };
-  let from: EntranceFrames['from'] = { opacity: 0 };
-  let to: EntranceFrames['to'] = { opacity: 1 };
   const type = a.type || 'fadeIn';
-  if (a.presetClass === 'exit') {
-    // reverse: visible → hidden
-    from = { opacity: 1 };
-    to = { opacity: 0 };
-    if (type === 'flyOut' || type.startsWith('fly')) to.transform = move[dir];
-    else if (type.startsWith('wipe')) to.clipPath = clipFrom[dir];
-    else if (type === 'zoomOut') to.transform = 'scale(0.3)';
-    else to.transform = move[dir];
-  } else if (a.presetClass === 'emph') {
-    // pulse: normal → enlarged → normal (smooth, no snap-back)
-    from = { opacity: 1, transform: 'scale(1)' };
-    to = { opacity: 1, transform: 'scale(1.12)' };
-    if (type === 'pulse') {
-      return {
-        from: { opacity: 1, transform: 'scale(1)' },
-        mid: { opacity: 1, transform: 'scale(1.12)' },
-        to: { opacity: 1, transform: 'scale(1)' }
-      };
-    }
-  } else {
-    // entrance
+  if (a.presetClass === 'emph') {
+    // Emphasis: the element is already on stage; every effect returns to the natural state at the
+    // end (PowerPoint emphasis effects never permanently change the object).
     switch (type) {
-      case 'flyIn':
-        from = { opacity: 0, transform: move[dir] };
-        break;
-      case 'wipeIn':
-        from = { opacity: 1, clipPath: clipFrom[dir] };
-        break;
-      case 'zoomIn':
-        from = { opacity: 0, transform: 'scale(0.3)' };
-        break;
-      case 'riseUp':
-        from = { opacity: 0, transform: 'translateY(60px)' };
-        break;
-      case 'fadeIn':
+      case 'grow':
+        return {
+          frames: [
+            { opacity: 1, transform: 'scale(1)', offset: 0 },
+            { opacity: 1, transform: 'scale(1.3)', offset: 0.7 },
+            { opacity: 1, transform: 'scale(1)', offset: 1 }
+          ]
+        };
+      case 'shake':
+        return {
+          frames: [
+            { opacity: 1, transform: 'translateX(0)', offset: 0 },
+            { opacity: 1, transform: 'translateX(-11px)', offset: 0.16 },
+            { opacity: 1, transform: 'translateX(11px)', offset: 0.32 },
+            { opacity: 1, transform: 'translateX(-9px)', offset: 0.48 },
+            { opacity: 1, transform: 'translateX(9px)', offset: 0.62 },
+            { opacity: 1, transform: 'translateX(-5px)', offset: 0.76 },
+            { opacity: 1, transform: 'translateX(5px)', offset: 0.9 },
+            { opacity: 1, transform: 'translateX(0)', offset: 1 }
+          ]
+        };
+      case 'flash':
+        return {
+          frames: [
+            { opacity: 1, offset: 0 },
+            { opacity: 0, offset: 0.25 },
+            { opacity: 1, offset: 0.5 },
+            { opacity: 0, offset: 0.75 },
+            { opacity: 1, offset: 1 }
+          ]
+        };
+      case 'pulse':
       default:
-        from = { opacity: 0 };
-        break;
+        // pulse: normal → enlarged → normal (smooth, no snap-back)
+        return {
+          frames: [
+            { opacity: 1, transform: 'scale(1)', offset: 0 },
+            { opacity: 1, transform: 'scale(1.12)', offset: 0.5 },
+            { opacity: 1, transform: 'scale(1)', offset: 1 }
+          ]
+        };
     }
   }
-  return { from, to };
+  if (a.presetClass === 'exit') {
+    // reverse: visible → hidden
+    switch (type) {
+      case 'fadeOut':
+        return { frames: [{ opacity: 1 }, { opacity: 0 }] };
+      case 'wipeOut':
+      case 'wipe':
+        return { frames: [{ opacity: 1, clipPath: 'none' }, { opacity: 1, clipPath: clipFrom[dir] }] };
+      case 'zoomOut':
+      case 'zoom':
+        return { frames: [{ opacity: 1, transform: 'scale(1)' }, { opacity: 0, transform: 'scale(0.3)' }] };
+      case 'flyOut':
+      case 'fly':
+      default:
+        return { frames: [{ opacity: 1, transform: 'translateX(0)' }, { opacity: 0, transform: move[dir] }] };
+    }
+  }
+  // entrance
+  switch (type) {
+    case 'flyIn':
+    case 'fly':
+      return { frames: [{ opacity: 0, transform: move[dir] }, { opacity: 1 }] };
+    case 'wipeIn':
+    case 'wipe':
+      return { frames: [{ opacity: 1, clipPath: clipFrom[dir] }, { opacity: 1, clipPath: 'inset(0 0 0 0)' }] };
+    case 'zoomIn':
+    case 'zoom':
+      return { frames: [{ opacity: 0, transform: 'scale(0.3)' }, { opacity: 1 }] };
+    case 'riseUp':
+      return { frames: [{ opacity: 0, transform: 'translateY(60px)' }, { opacity: 1 }] };
+    case 'bounceIn':
+    case 'bounce': {
+      // Drop in from one side, then two diminishing rebounds before settling.
+      // ('b' reverses the drop direction; all others fall from above, like PowerPoint's Bounce In.)
+      // The drop distance is intentionally larger than the other effects so the bounce reads clearly.
+      const fromBelow = dir === 'b';
+      const top = fromBelow ? 'translateY(120px)' : 'translateY(-120px)';
+      const rebound = (px: number) => `translateY(${fromBelow ? px : -px}px)`;
+      return {
+        frames: [
+          { opacity: 0, transform: top, offset: 0 },
+          { opacity: 1, transform: 'translateY(0)', offset: 0.4 },
+          { opacity: 1, transform: rebound(28), offset: 0.58 },
+          { opacity: 1, transform: 'translateY(0)', offset: 0.73 },
+          { opacity: 1, transform: rebound(12), offset: 0.87 },
+          { opacity: 1, transform: 'translateY(0)', offset: 1 }
+        ]
+      };
+    }
+    case 'fadeIn':
+    default:
+      return { frames: [{ opacity: 0 }, { opacity: 1 }] };
+  }
 }
 
 /** Play one element entrance animation and clear inline styles when done. */
 function playEntrance(node: HTMLElement, kf: EntranceFrames, opts: KeyframeAnimationOptions): void {
-  const base = {
-    opacity: kf.from.opacity ?? 1,
-    transform: kf.from.transform ?? 'none',
-    clipPath: kf.from.clipPath ?? 'none'
-  };
-  const end = {
-    opacity: kf.to.opacity ?? 1,
-    transform: kf.to.transform ?? 'none',
-    clipPath: kf.to.clipPath ?? 'none'
-  };
-  const frames: Keyframe[] = [{ ...base, offset: 0 }];
-  if (kf.mid) {
-    frames.push({
-      opacity: kf.mid.opacity ?? 1,
-      transform: kf.mid.transform ?? 'none',
-      clipPath: kf.mid.clipPath ?? 'none',
-      offset: 0.5
-    });
-  }
-  frames.push({ ...end, offset: 1 });
+  const list = kf.frames.length ? kf.frames : [{ opacity: 0 }, { opacity: 1 }];
+  const n = list.length;
+  const frames: Keyframe[] = list.map((f, i) => ({
+    opacity: f.opacity ?? 1,
+    transform: f.transform ?? 'none',
+    clipPath: f.clipPath ?? 'none',
+    offset: f.offset ?? (n > 1 ? i / (n - 1) : 1)
+  }));
   const anim = node.animate(frames, opts);
   anim.onfinish = () => {
     node.style.opacity = '';
@@ -3089,16 +3150,18 @@ function applyEntranceAnimations(layer: HTMLElement, slide: any): void {
     if (!node) continue;
     const kf = entranceKeyframes(a);
     // prime the hidden/start state before the layer becomes visible (no flash)
-    node.style.opacity = String(kf.from.opacity ?? 1);
-    if (kf.from.transform) node.style.transform = kf.from.transform;
-    if (kf.from.clipPath) node.style.clipPath = kf.from.clipPath;
-    const opts: KeyframeAnimationOptions = { duration: a.duration || 500, easing: 'ease', fill: 'both' };
+    const start = kf.frames[0] || {};
+    node.style.opacity = String(start.opacity ?? 1);
+    if (start.transform) node.style.transform = start.transform;
+    if (start.clipPath) node.style.clipPath = start.clipPath;
+    const dur = animDurationMs(a.duration);
+    const opts: KeyframeAnimationOptions = { duration: dur, easing: 'ease', fill: 'both' };
     const trigger = a.trigger || 'afterPrev';
     if (trigger === 'onClick') {
       presentClickAnims.push({ node, kf, opts, cls: a.presetClass || 'entr' });
     } else {
       playEntrance(node, kf, { ...opts, delay: cum });
-      if (trigger !== 'withPrev') cum += a.duration || 500;
+      if (trigger !== 'withPrev') cum += dur;
     }
   }
 }
