@@ -2,7 +2,7 @@
   "name": "vscode-pptx",
   "displayName": "PPTX Editor",
   "description": "VSCode PPTX preview and editor extension powered by pptx-parser (default handler for .pptx)",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "publisher": "fefeding",
   "license": "MIT",
   "repository": {
@@ -79,7 +79,7 @@
     "publish": "vsce publish"
   },
   "dependencies": {
-    "@fefeding/ppt-parser": "^1.0.25",
+    "@fefeding/ppt-parser": "^1.0.26",
     "jszip": "^3.10.2",
     "tinycolor2": "^1.6.0"
   },
