@@ -257,6 +257,12 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  // The editor-title preview/edit toggle is gated on `pptx:editing`. Initialise it to `false`
+  // right away so the context key always has a concrete boolean value: some when-clause
+  // evaluators treat an *undefined* boolean context inside a conjunction as false, which would
+  // hide BOTH the viewMode and editMode buttons until a document happened to be focused.
+  void vscode.commands.executeCommand('setContext', 'pptx:editing', false);
+
   context.subscriptions.push(
     vscode.commands.registerCommand('pptx-parser.revert', () => provider.revertActive()),
     vscode.commands.registerCommand('pptx-parser.exportCopy', () => provider.exportActive()),
