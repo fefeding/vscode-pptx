@@ -11,7 +11,7 @@
 // The controls of each tab live in `ribbon-tabs.ts`; this file only provides the builders.
 import { h } from './util';
 import { icon } from './icons';
-import { t, tip, withAccel } from './i18n';
+import { t, withAccel } from './i18n';
 import { openMenuAt, MenuItem } from './menu';
 import { THEMES } from '@fefeding/ppt-parser';
 import type { EditorMode } from '../protocol';
@@ -330,15 +330,8 @@ export function createRibbon(api: RibbonApi): { root: HTMLElement; sync(s: Ribbo
   const builders = { bigButton, miniButton, splitButton, selectBox, colorBox, gallery, chip, group, advanceCheck, animListBox };
 
   // ---------- title bar / quick access ----------
-  // 文档标题 / 未保存点不在这里画：它们与 VS Code 编辑器标题栏重复。
-  // 预览/编辑切换同样留在 webview 内（不占 VS Code 标题栏），命令面板仍可调用
-  // pptx-parser.viewMode / editMode / toggleMode（见 package.json 的 commands）。
-  const modeGroup = h('div', { class: 'rb-seg', role: 'group', 'aria-label': t('tbar.mode') });
-  const modePreview = h('button', { class: 'rb-seg-btn', type: 'button', title: tip('cmd.modePreview') }, [t('tbar.mode.preview')]);
-  const modeEdit = h('button', { class: 'rb-seg-btn', type: 'button', title: tip('cmd.modeEdit') }, [t('tbar.mode.edit')]);
-  modePreview.onclick = () => api.cmd('setMode', 'preview');
-  modeEdit.onclick = () => api.cmd('setMode', 'edit');
-  modeGroup.append(modePreview, modeEdit);
+  // 文档标题 / 未保存点 / 预览-编辑切换都不在这里画：前两者与 VS Code 编辑器标题栏重复，
+  // 模式切换由 host 注册为 editor/title 命令（见 package.json 的 menus）经 setMode 消息驱动。
 
   const collapseBtn = h('button', { class: 'rb-btn rb-btn-mini rb-collapse', type: 'button', 'aria-expanded': 'true' }, [icon('chevron', 12)]);
   collapseBtn.title = t('tbar.ribbonHide');
@@ -402,7 +395,6 @@ export function createRibbon(api: RibbonApi): { root: HTMLElement; sync(s: Ribbo
   }
 
   const rightQat = h('div', { class: 'rb-qat' }, [
-    modeGroup,
     miniButton({ ico: 'help', title: withAccel(t('cmd.shortcuts'), '?'), onClick: () => api.cmd('shortcuts') }).el
   ]);
 
@@ -445,10 +437,6 @@ export function createRibbon(api: RibbonApi): { root: HTMLElement; sync(s: Ribbo
     lastState = s;
     // Preview mode swaps the tab ribbon for a compact header menu (no expandable toolbar).
     root.classList.toggle('rb-preview', s.mode === 'preview');
-    modeEdit.classList.toggle('on', s.mode === 'edit');
-    modePreview.classList.toggle('on', s.mode === 'preview');
-    modeEdit.classList.toggle('disabled', s.mode === 'edit');
-    modePreview.classList.toggle('disabled', s.mode === 'preview');
     for (const w of widgets) w.sync?.(s);
     // Preview mode has no editing tabs — hide the ones that would be empty and fall back to
     // the first visible tab. Visibility is re-applied on every render because switching back
