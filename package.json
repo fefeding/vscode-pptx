@@ -2,7 +2,7 @@
   "name": "vscode-pptx",
   "displayName": "PPTX Editor",
   "description": "VSCode PPTX preview and editor extension powered by pptx-parser (default handler for .pptx)",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "publisher": "fefeding",
   "license": "MIT",
   "repository": {
@@ -67,26 +67,7 @@
         "title": "%command.toggleMode%",
         "category": "PPTX"
       }
-    ],
-    "menus": {
-      "editor/title": [
-        {
-          "command": "pptx-parser.revert",
-          "when": "resourceExtname == .pptx",
-          "group": "navigation"
-        },
-        {
-          "command": "pptx-parser.exportCopy",
-          "when": "resourceExtname == .pptx",
-          "group": "navigation"
-        },
-        {
-          "command": "pptx-parser.toggleMode",
-          "when": "resourceExtname == .pptx",
-          "group": "navigation"
-        }
-      ]
-    }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "node esbuild.js --production",

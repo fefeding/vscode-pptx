@@ -103,10 +103,10 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
             await sendInit();
             break;
           case 'setMode':
-            document.mode = message.mode;
-            // Keep the editor-title toggle (pptx:editing) in sync when the webview changes mode.
-            if (this._activeDoc === document) this.syncContext();
-            break;
+                  document.mode = message.mode;
+                  // Keep the mode context key in sync (palette commands toggle the same state).
+                  if (this._activeDoc === document) this.syncContext();
+                  break;
           case 'sync':
             document.setBytes(message.bytes);
             document.setDirty(message.dirty);
@@ -193,12 +193,12 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     if (this._activeDoc) await this.saveAs(this._activeDoc);
   }
 
-  /** 刷新编辑器标题栏命令所需的上下文（pptx:editing 控制预览/编辑按钮的显隐）。 */
+  /** 刷新模式上下文键（pptx:editing），供命令面板里的预览/编辑命令使用。 */
   private syncContext(): void {
     void vscode.commands.executeCommand('setContext', 'pptx:editing', this._activeDoc?.mode === 'edit');
   }
 
-  /** 标题栏「预览 / 编辑」命令：把模式推给当前活动的 webview。 */
+  /** 命令面板里的「预览 / 编辑」命令：把模式推给当前活动的 webview。 */
   public async setActiveMode(mode: EditorMode): Promise<void> {
     const doc = this._activeDoc;
     if (!doc) return;
@@ -207,7 +207,7 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     await this._activePanel?.webview.postMessage({ type: 'setMode', mode } as HostToWebview);
   }
 
-  /** 标题栏切换按钮：在预览 / 编辑之间翻转当前活动文档的模式。 */
+  /** 在预览 / 编辑之间翻转当前活动文档的模式（命令面板）。 */
   public async toggleActiveMode(): Promise<void> {
     const doc = this._activeDoc;
     if (!doc) return;
@@ -264,10 +264,7 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  // The editor-title preview/edit toggle is gated on `pptx:editing`. Initialise it to `false`
-  // right away so the context key always has a concrete boolean value: some when-clause
-  // evaluators treat an *undefined* boolean context inside a conjunction as false, which would
-  // hide BOTH the viewMode and editMode buttons until a document happened to be focused.
+  // `pptx:editing` mirrors the focused document's mode so commands can gate on it.
   void vscode.commands.executeCommand('setContext', 'pptx:editing', false);
 
   context.subscriptions.push(
