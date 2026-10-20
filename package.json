@@ -2,7 +2,7 @@
   "name": "vscode-pptx",
   "displayName": "PPTX Editor",
   "description": "VSCode PPTX preview and editor extension powered by pptx-parser (default handler for .pptx)",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "publisher": "fefeding",
   "license": "MIT",
   "repository": {
@@ -28,9 +28,6 @@
     "office"
   ],
   "icon": "icon.png",
-  "activationEvents": [
-    "onCustomEditor:pptx-parser.pptxEditor"
-  ],
   "contributes": {
     "customEditors": [
       {
@@ -52,6 +49,18 @@
       {
         "command": "pptx-parser.exportCopy",
         "title": "%command.exportCopy%"
+      },
+      {
+        "command": "pptx-parser.viewMode",
+        "title": "%command.viewMode%",
+        "category": "PPTX",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "pptx-parser.editMode",
+        "title": "%command.editMode%",
+        "category": "PPTX",
+        "icon": "$(edit)"
       }
     ],
     "menus": {
@@ -65,6 +74,16 @@
           "command": "pptx-parser.exportCopy",
           "when": "resourceExtname == .pptx",
           "group": "navigation"
+        },
+        {
+          "command": "pptx-parser.viewMode",
+          "when": "resourceExtname == .pptx && !pptx:editing",
+          "group": "1_mode"
+        },
+        {
+          "command": "pptx-parser.editMode",
+          "when": "resourceExtname == .pptx && pptx:editing",
+          "group": "1_mode"
         }
       ]
     }

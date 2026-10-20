@@ -1,5 +1,7 @@
 {
   "command.revert": "PPTX: Discard Changes and Reload",
   "command.exportCopy": "PPTX: Export Copy...",
+  "command.viewMode": "PPTX: Preview",
+  "command.editMode": "PPTX: Edit",
   "customEditor.pptx": "PPTX Editor"
 }

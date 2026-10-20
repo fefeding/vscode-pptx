@@ -42,6 +42,8 @@ export type HostToWebview =
     locale: string;
   }
   | { type: 'bytes'; bytes: string; dirty: boolean }
+  /** Push a preview/edit mode change from the editor title bar (host command) into the webview. */
+  | { type: 'setMode'; mode: EditorMode }
   | { type: 'saved' }
   | { type: 'reverted' }
   | { type: 'info'; message: string; kind?: 'info' | 'warn' | 'error' };

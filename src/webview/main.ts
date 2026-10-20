@@ -458,8 +458,6 @@ function ribbonState(): RibbonState {
   const themeId = editing ? (typeof store.doc?.theme === 'string' ? store.doc.theme : 'blue') : '';
   return {
     mode: state.mode,
-    title: state.title,
-    dirty: state.dirty,
     canUndo: editing && store.canUndo(),
     canRedo: editing && store.canRedo(),
     zoom: state.zoom,
@@ -3413,6 +3411,10 @@ window.addEventListener('message', async (event: MessageEvent<HostToWebview>) =>
       case 'reverted':
         state.dirty = false;
         syncChrome();
+        break;
+      case 'setMode':
+        // 来自 VS Code 标题栏的 pptx-parser.viewMode / pptx-parser.editMode 命令（host 经 setMode 消息下发）
+        await setMode(msg.mode === 'edit' ? 'edit' : 'preview');
         break;
       case 'info':
         toast(msg.message, msg.kind || 'info');

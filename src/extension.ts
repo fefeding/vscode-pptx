@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { PptxCustomDocument } from './pptx-document';
-import type { HostToWebview, WebviewToHost } from './protocol';
+import type { EditorMode, HostToWebview, WebviewToHost } from './protocol';
 
 const VIEW_TYPE = 'pptx-parser.pptxEditor';
 
@@ -33,6 +33,9 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
   /** The currently focused document (used by commands like "Export Copy"). */
   private _activeDoc: PptxCustomDocument | undefined;
 
+  /** The webview panel of the currently focused document (so title-bar commands can message it). */
+  private _activePanel: vscode.WebviewPanel | undefined;
+
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   async openCustomDocument(
@@ -62,7 +65,11 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     webviewPanel.webview.html = this.getWebviewHtml(webviewPanel.webview);
 
     webviewPanel.onDidChangeViewState((e) => {
-      if (e.webviewPanel.active) this._activeDoc = document;
+      if (e.webviewPanel.active) {
+        this._activeDoc = document;
+        this._activePanel = webviewPanel;
+        this.syncContext();
+      }
     });
 
     const send = (msg: HostToWebview) => webviewPanel.webview.postMessage(msg);
@@ -97,6 +104,8 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
             break;
           case 'setMode':
             document.mode = message.mode;
+            // Keep the editor-title toggle (pptx:editing) in sync when the webview changes mode.
+            if (this._activeDoc === document) this.syncContext();
             break;
           case 'sync':
             document.setBytes(message.bytes);
@@ -184,6 +193,20 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     if (this._activeDoc) await this.saveAs(this._activeDoc);
   }
 
+  /** 刷新编辑器标题栏命令所需的上下文（pptx:editing 控制预览/编辑按钮的显隐）。 */
+  private syncContext(): void {
+    void vscode.commands.executeCommand('setContext', 'pptx:editing', this._activeDoc?.mode === 'edit');
+  }
+
+  /** 标题栏「预览 / 编辑」命令：把模式推给当前活动的 webview。 */
+  public async setActiveMode(mode: EditorMode): Promise<void> {
+    const doc = this._activeDoc;
+    if (!doc) return;
+    doc.mode = mode;
+    this.syncContext();
+    await this._activePanel?.webview.postMessage({ type: 'setMode', mode } as HostToWebview);
+  }
+
   private getWebviewHtml(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview.js')
@@ -236,7 +259,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('pptx-parser.revert', () => provider.revertActive()),
-    vscode.commands.registerCommand('pptx-parser.exportCopy', () => provider.exportActive())
+    vscode.commands.registerCommand('pptx-parser.exportCopy', () => provider.exportActive()),
+    vscode.commands.registerCommand('pptx-parser.viewMode', () => provider.setActiveMode('preview')),
+    vscode.commands.registerCommand('pptx-parser.editMode', () => provider.setActiveMode('edit'))
   );
 }
 
