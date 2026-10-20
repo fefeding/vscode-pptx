@@ -3171,6 +3171,8 @@ function showCtxMenu(x: number, y: number) {
   if (state.mode === 'edit') {
     const hasSel = store.sel.length > 0;
     items.push(
+      { label: t('menu.previewMode'), icon: 'showSlide', onClick: () => setMode('preview') },
+      { type: 'sep' },
       { label: t('menu.bringFront'), icon: 'zFront', disabled: !hasSel, onClick: () => runAction(() => actions.zOrder('front')) },
       { label: t('menu.sendBack'), icon: 'zBack', disabled: !hasSel, onClick: () => runAction(() => actions.zOrder('back')) },
       { type: 'sep' },
