@@ -3,5 +3,6 @@
   "command.exportCopy": "PPTX：导出副本…",
   "command.viewMode": "PPTX：预览",
   "command.editMode": "PPTX：编辑",
+  "command.toggleMode": "PPTX：切换预览 / 编辑",
   "customEditor.pptx": "PPTX 编辑器"
 }

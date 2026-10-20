@@ -3,5 +3,6 @@
   "command.exportCopy": "PPTX: Export Copy...",
   "command.viewMode": "PPTX: Preview",
   "command.editMode": "PPTX: Edit",
+  "command.toggleMode": "PPTX: Switch Preview / Edit",
   "customEditor.pptx": "PPTX Editor"
 }

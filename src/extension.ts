@@ -207,6 +207,13 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     await this._activePanel?.webview.postMessage({ type: 'setMode', mode } as HostToWebview);
   }
 
+  /** 标题栏切换按钮：在预览 / 编辑之间翻转当前活动文档的模式。 */
+  public async toggleActiveMode(): Promise<void> {
+    const doc = this._activeDoc;
+    if (!doc) return;
+    await this.setActiveMode(doc.mode === 'edit' ? 'preview' : 'edit');
+  }
+
   private getWebviewHtml(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview.js')
@@ -267,7 +274,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('pptx-parser.revert', () => provider.revertActive()),
     vscode.commands.registerCommand('pptx-parser.exportCopy', () => provider.exportActive()),
     vscode.commands.registerCommand('pptx-parser.viewMode', () => provider.setActiveMode('preview')),
-    vscode.commands.registerCommand('pptx-parser.editMode', () => provider.setActiveMode('edit'))
+    vscode.commands.registerCommand('pptx-parser.editMode', () => provider.setActiveMode('edit')),
+    vscode.commands.registerCommand('pptx-parser.toggleMode', () => provider.toggleActiveMode())
   );
 }
 

@@ -243,7 +243,8 @@ function buildLayout() {
     showSlideCtxMenu(e.clientX, e.clientY, idx);
   });
   const spTitle = h('span', {}, [t('panel.slides')]);
-  const spNewBtn = h('button', { class: 'btn sp-new', type: 'button', onclick: newSlide }, [icon('newSlide', 14)]);
+  // `edit-only`: the slide list is read-only in preview mode, so adding a slide must be hidden there.
+  const spNewBtn = h('button', { class: 'btn sp-new edit-only', type: 'button', onclick: newSlide }, [icon('newSlide', 14)]);
   localize(() => {
     spTitle.textContent = t('panel.slides');
     spNewBtn.title = t('panel.newSlide');
