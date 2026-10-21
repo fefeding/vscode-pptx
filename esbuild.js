@@ -12,19 +12,16 @@ const path = require('path');
 const fs = require('fs');
 
 /**
- * Resolve an entry file inside @fefeding/ppt-parser.
- * Prefer a sibling `pptx-parser` repo (local dev / live-editing the parser), and fall back to the
- * published npm package in node_modules (used on CI or when no sibling repo is present). The npm
- * package already ships `dist/ppt-parser.browser.js` and `examples/chart-lib/chart-renderer.js`.
+ * Resolve an entry file inside @fefeding/ppt-parser from the published npm package in node_modules.
+ * The package ships `dist/ppt-parser.browser.js` and `examples/chart-lib/chart-renderer.js`, which are
+ * the only sources used for bundling (the sibling `../pptx-parser` repo is not referenced at build time).
  */
 function resolveParserEntry(rel) {
-  const local = path.resolve(__dirname, '..', 'pptx-parser', rel);
-  if (fs.existsSync(local)) return local;
   const fromNodeModules = path.resolve(__dirname, 'node_modules', '@fefeding', 'ppt-parser', rel);
   if (!fs.existsSync(fromNodeModules)) {
     throw new Error(
       `Cannot resolve @fefeding/ppt-parser entry "${rel}". ` +
-      `Run "npm install" or place a sibling "pptx-parser" repo so the file is available.`
+      `Run "npm install" so the package is present in node_modules.`
     );
   }
   return fromNodeModules;
@@ -32,6 +29,26 @@ function resolveParserEntry(rel) {
 
 const watch = process.argv.includes('--watch');
 const production = process.argv.includes('--production');
+
+/**
+ * The webview (browser) bundle pulls in @fefeding/ppt-parser's browser build, which still keeps a
+ * Node-only `require('fs')` inside `tXml.parseStream` (only reached when parsing from a file path —
+ * never in the browser). Stub `fs` so the bundle succeeds instead of failing to resolve a Node builtin.
+ * The stub's methods are never called on the webview path; they're here only to avoid a silent
+ * `undefined` if that branch is somehow hit.
+ */
+const browserFsStub = {
+  name: 'browser-fs-stub',
+  setup(build) {
+    build.onResolve({ filter: /^fs$/ }, () => ({ path: 'fs', namespace: 'browser-fs-stub' }));
+    build.onLoad({ filter: /.*/, namespace: 'browser-fs-stub' }, () => ({
+      contents:
+        'export default { createReadStream(){}, readFile(){}, readFileSync(){return "";}, ' +
+        'writeFileSync(){}, existsSync(){return false;}, statSync(){return {};}, promises:{} };',
+      loader: 'js'
+    }));
+  }
+};
 
 async function buildWithContext() {
   const base = {
@@ -64,7 +81,8 @@ async function buildWithContext() {
     alias: {
       '@fefeding/ppt-parser': resolveParserEntry('dist/ppt-parser.browser.js'),
       '@fefeding/ppt-parser/chart-renderer': resolveParserEntry('examples/chart-lib/chart-renderer.js')
-    }
+    },
+    plugins: [browserFsStub]
   });
 
   if (watch) {

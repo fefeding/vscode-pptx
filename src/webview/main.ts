@@ -13,7 +13,7 @@ import { CSS } from './style';
 import { h, clamp } from './util';
 import { t, data, setLocale, kbd } from './i18n';
 import { openMenu, openMenuAt, popupKeydown, MenuItem } from './menu';
-import { createRibbon, RibbonState } from './ribbon';
+import { createRibbon, RibbonState, readStore, writeStore } from './ribbon';
 import { icon } from './icons';
 import {
   pptxToHtml,
@@ -149,6 +149,14 @@ let slideHostEl!: HTMLElement;
 let overlayEl!: HTMLElement;
 let gridEl!: HTMLElement;
 let inspectorEl!: HTMLElement;
+/** Element-list drawer state (persisted): collapsed by default so properties stay in view. */
+const EL_LIST_KEY = 'pptx.inspector.elList';
+let elListOpen = readStore(EL_LIST_KEY) === '1';
+let elFilter = '';
+let elFilterFocused = false;
+let elFilterNode: HTMLInputElement | null = null;
+/** Selection signature of the last inspector render, used to keep the scroll position across rebuilds. */
+let lastInspSelKey = '';
 let statusCountEl!: HTMLElement;
 let zoomLabelEl!: HTMLElement;
 let gridBtn!: HTMLElement;
@@ -1767,38 +1775,47 @@ function syncChrome(): void {
 function renderInspector() {
   if (state.mode !== 'edit') {
     inspectorEl.innerHTML = '';
+    lastInspSelKey = '';
     return;
   }
   if (state.editingText && store.sel.length) return; // don't rebuild while typing (keeps focus)
+  // Re-rendering wipes the DOM, so remember where the panel was scrolled to: property edits must not
+  // throw the user back to the top. A *different* selection is a new context and starts at the top.
+  const selKey = store.sel.join(',');
+  const keepScroll = selKey === lastInspSelKey;
+  const prevScroll = inspectorEl.scrollTop;
+  lastInspSelKey = selKey;
   inspectorEl.innerHTML = '';
   const slide = store.slide;
   const count = store.slideCount;
-  inspectorEl.append(h('h3', {}, [t('status.counter', state.current + 1, count)]));
+  const els: any[] = slide?.elements || [];
 
-  // Element list
-  const list = h('ul', { class: 'el-list' });
-  for (const el of slide?.elements || []) {
-    const tag = elSnippet(el);
-    list.append(
-      h(
-        'li',
-        {
-          class: store.sel.includes(el.id) ? 'active' : '',
-          onclick: () => {
-            store.setSel([el.id]);
-            renderSelection();
-            renderInspector();
-          }
-        },
-        [h('span', {}, [tag.name]), h('span', { class: 'tag' }, [tag.type])]
-      )
-    );
-  }
-  inspectorEl.append(h('h4', {}, [t('insp.elements')]), list);
+  // Sticky header: slide counter + the element-list toggle. The list itself is a drawer (collapsed by
+  // default) instead of a flat list above the properties — otherwise a slide with dozens of elements
+  // pushes every property field far below the fold.
+  const toggle = h(
+    'button',
+    {
+      class: 'insp-toggle' + (elListOpen ? ' on' : ''),
+      type: 'button',
+      'aria-expanded': elListOpen ? 'true' : 'false',
+      title: elListOpen ? t('insp.elCollapse') : t('insp.elExpand')
+    },
+    [icon('chevron', 12), h('span', {}, [t('insp.elements', els.length)])]
+  );
+  toggle.onclick = () => {
+    elListOpen = !elListOpen;
+    elFilter = '';
+    writeStore(EL_LIST_KEY, elListOpen ? '1' : '0');
+    renderInspector();
+  };
+  inspectorEl.append(h('div', { class: 'insp-head' }, [h('h3', {}, [t('status.counter', state.current + 1, count)]), toggle]));
+
+  if (elListOpen) inspectorEl.append(renderElDrawer(els));
 
   if (store.sel.length > 1) {
-    const els = store.sel.map((id: string) => store.findElement(id)).filter(Boolean);
-    renderMultiInspector(els);
+    const selected = store.sel.map((id: string) => store.findElement(id)).filter(Boolean);
+    renderMultiInspector(selected);
   } else if (store.sel.length === 1) {
     const sel = store.findElement(store.sel[0]);
     if (sel) renderElementInspector(sel);
@@ -1806,7 +1823,86 @@ function renderInspector() {
   } else {
     renderSlideInspector(slide);
   }
+  inspectorEl.scrollTop = keepScroll ? prevScroll : 0;
   syncChrome();
+}
+
+/**
+ * Element list drawer: name filter (once a slide has more than a handful of elements) plus a scrollable
+ * list that keeps the selected entry in view. Rebuilding only the list on filter input keeps the caret
+ * in the filter box; a full inspector rebuild restores focus explicitly.
+ */
+function renderElDrawer(els: any[]): HTMLElement {
+  const drawer = h('div', { class: 'el-drawer' });
+  const scroller = h('ul', { class: 'el-list' });
+  const paint = () => {
+    scroller.innerHTML = '';
+    const q = elFilter.trim().toLowerCase();
+    const shown = q
+      ? els.filter((el) => {
+          const s = elSnippet(el);
+          return (s.name + ' ' + s.type).toLowerCase().includes(q);
+        })
+      : els;
+    if (!shown.length) {
+      scroller.append(h('li', { class: 'empty' }, [t('insp.elNoMatch')]));
+      return;
+    }
+    let active: HTMLElement | null = null;
+    for (const el of shown) {
+      const tag = elSnippet(el);
+      const li = h(
+        'li',
+        {
+          class: store.sel.includes(el.id) ? 'active' : '',
+          title: tag.name,
+          onclick: () => {
+            store.setSel([el.id]);
+            renderSelection();
+            renderInspector();
+          }
+        },
+        [h('span', { class: 'name' }, [tag.name]), h('span', { class: 'tag' }, [tag.type])]
+      );
+      if (store.sel.includes(el.id)) active = li;
+      scroller.append(li);
+    }
+    if (active) scrollIntoBox(scroller, active);
+  };
+
+  if (els.length > 6) {
+    const input = h('input', { class: 'el-filter', type: 'text', placeholder: t('insp.elFilter') }, []);
+    input.value = elFilter;
+    input.addEventListener('input', () => {
+      elFilter = input.value;
+      paint();
+    });
+    // A rebuild triggered from elsewhere (an undo, a canvas click…) would drop the caret, so give the
+    // filter box its focus back when it was the active element.
+    input.addEventListener('blur', () => {
+      if (document.activeElement !== input) elFilterFocused = false;
+    });
+    input.addEventListener('focus', () => (elFilterFocused = true));
+    elFilterNode = input;
+    drawer.append(input);
+  } else {
+    elFilterNode = null;
+  }
+  paint();
+  drawer.append(scroller);
+  if (elFilterNode && elFilterFocused) {
+    elFilterNode.focus();
+    elFilterNode.setSelectionRange(elFilterNode.value.length, elFilterNode.value.length);
+  }
+  return drawer;
+}
+
+/** Scroll `item` into view inside `box` only — never touches the ancestor scroll chains. */
+function scrollIntoBox(box: HTMLElement, item: HTMLElement) {
+  const b = box.getBoundingClientRect();
+  const i = item.getBoundingClientRect();
+  if (i.top < b.top) box.scrollTop -= b.top - i.top + 4;
+  else if (i.bottom > b.bottom) box.scrollTop += i.bottom - b.bottom + 4;
 }
 
 // Multi-selection panel: arrange / order / group actions shared across the selection.

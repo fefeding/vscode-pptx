@@ -403,10 +403,27 @@ button { font-family: inherit; }
 .shortcuts td.key { width: 34%; color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
 
 /* ===== Right-side properties panel ===== */
-.inspector { width: 290px; background: var(--panel); border-left: 1px solid var(--border); overflow-y: auto; padding: 10px; flex: 0 0 auto; }
+/* The panel is one scroll container; only the header is sticky, so long property lists scroll
+   under it and the "elements" toggle is always reachable. */
+.inspector { width: 290px; background: var(--panel); border-left: 1px solid var(--border); overflow-y: auto; padding: 0 10px 10px; flex: 0 0 auto; }
 .inspector.hidden { display: none; }
 .inspector h3 { font-size: 12px; margin: 0 0 8px; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; }
 .inspector h4 { font-size: 11px; margin: 12px 0 6px; color: var(--muted); }
+.insp-head {
+  position: sticky; top: 0; z-index: 3; background: var(--panel);
+  margin: 0 -10px; padding: 8px 10px 7px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+.insp-head h3 { flex: 1 1 auto; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.insp-toggle {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 11px; font-family: inherit;
+}
+.insp-toggle:hover { background: var(--panel-3); }
+.insp-toggle.on { background: var(--accent-bg); border-color: var(--accent-2); }
+.insp-toggle .rb-ico svg { transition: transform .12s ease; }
+.insp-toggle.on .rb-ico svg { transform: rotate(180deg); }
 .el-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; margin: -4px 0 8px; }
 .field { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
 .field label { width: 72px; color: var(--muted); flex: 0 0 auto; font-size: 11px; }
@@ -422,8 +439,20 @@ button { font-family: inherit; }
 .chk { display: flex; align-items: center; gap: 6px; }
 .el-list { list-style: none; margin: 0; padding: 0; }
 .el-list li { padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 4px; cursor: pointer; display: flex; justify-content: space-between; gap: 6px; }
+.el-list li:hover { background: var(--panel-2); }
 .el-list li.active { border-color: var(--accent-2); background: var(--panel-2); }
 .el-list li .tag { color: var(--muted); font-size: 11px; }
+.el-list li .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.el-list li.empty { border-color: transparent; cursor: default; }
+/* Drawer for the element list: its own scroll box, so a slide with dozens of elements can never
+   push the property fields below the fold. */
+.el-drawer { border: 1px solid var(--border); border-radius: 4px; padding: 6px; margin: 8px 0 2px; }
+.el-drawer .el-list { max-height: 32vh; overflow-y: auto; }
+.el-filter {
+  width: 100%; box-sizing: border-box; margin-bottom: 6px; font-family: inherit; font-size: 12px;
+  background: var(--vscode-input-background, var(--panel-2)); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px;
+}
 .empty { color: var(--muted); font-size: 12px; padding: 8px 0; }
 
 /* ===== Status bar ===== */

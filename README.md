@@ -17,6 +17,7 @@ A VSCode extension built on [`@fefeding/ppt-parser`](https://github.com/fefeding
 - **Visual editing**:
   - Click to select elements on the canvas; drag to move; drag handles to resize; drag the rotation grip to rotate.
   - Properties panel: position / size / rotation, text (content / font size / color / alignment / bold / italic / underline), shapes (fill / border), image replacement.
+  - The element list is a collapsible drawer in the panel header (remembered across sessions): collapsed by default so the properties stay in view, with a name filter and its own scroll box for slides that carry dozens of elements.
   - Slide operations: add blank slide, duplicate, delete, drag thumbnails to reorder, set background color, lock, hide, speaker notes.
   - Insert elements: text box, rectangle, image (from local file).
   - Alignment / distribution / grouping / z-order / find-replace via the editor core actions.

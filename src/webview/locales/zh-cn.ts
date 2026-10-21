@@ -177,7 +177,11 @@ export const zhCN: Record<keyof typeof en, string> = {
   'status.snap': '参考线',
 
   // ---------- 属性面板 ----------
-  'insp.elements': '元素（点击可选中）',
+  'insp.elements': '元素（{0}）',
+  'insp.elExpand': '显示元素列表',
+  'insp.elCollapse': '隐藏元素列表',
+  'insp.elFilter': '筛选元素…',
+  'insp.elNoMatch': '没有匹配的元素',
   'insp.selectedCount': '已选中 {0} 个元素',
   'insp.arrange': '排列',
   'insp.slideProps': '幻灯片属性',
