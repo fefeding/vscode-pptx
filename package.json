@@ -76,8 +76,10 @@
     "publish": "vsce publish"
   },
   "dependencies": {
-    "@fefeding/ppt-parser": "^1.0.28",
+    "@fefeding/ppt-parser": "^1.0.31",
+    "html-to-image": "^1.11.13",
     "jszip": "^3.10.2",
+    "pdf-lib": "^1.17.1",
     "tinycolor2": "^1.6.0"
   },
   "devDependencies": {

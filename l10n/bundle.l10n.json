@@ -4,6 +4,10 @@
   "extension.initFailed": "Initialization failed: {0}",
   "extension.exportCopy": "Export Copy",
   "extension.exported": "Exported copy: {0}",
+  "extension.imageSaved": "Image saved: {0}",
+  "extension.imagesSaved": "Saved {0} images to {1}",
+  "extension.pdfSaved": "PDF saved: {0}",
+  "extension.chooseFolder": "Choose Folder",
   "command.revert": "PPTX: Discard Changes and Reload",
   "command.exportCopy": "PPTX: Export Copy..."
 }

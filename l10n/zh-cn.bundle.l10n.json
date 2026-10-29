@@ -4,6 +4,10 @@
   "extension.initFailed": "初始化失败：{0}",
   "extension.exportCopy": "导出副本",
   "extension.exported": "已导出副本：{0}",
+  "extension.imageSaved": "图片已保存：{0}",
+  "extension.imagesSaved": "已保存 {0} 张图片到 {1}",
+  "extension.pdfSaved": "PDF 已保存：{0}",
+  "extension.chooseFolder": "选择文件夹",
   "command.revert": "PPTX：放弃更改并重新加载",
   "command.exportCopy": "PPTX：导出副本…"
 }

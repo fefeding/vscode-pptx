@@ -23,6 +23,7 @@ import {
   docToPptx,
   createStore,
   createActions,
+  updateDiagramTexts,
   FONT_LIST,
   THEMES,
   LAYOUTS,
@@ -56,6 +57,8 @@ import {
   disposeDetachedCharts,
   disposeAllCharts
 } from './render';
+import { exportSlidesToPng, base64Of } from './exporter';
+import type { ExportedSlide } from './exporter';
 import {
   hasOpenModal,
   closeModal,
@@ -66,6 +69,7 @@ import {
   openMediaDialog,
   openShortcuts,
   openConfirm,
+  openDiagramTextDialog,
   shapeMenuItems
 } from './dialogs';
 // Same ECharts renderer the preview side uses (option building incl. 3D matches examples/index.html)
@@ -152,6 +156,11 @@ let inspectorEl!: HTMLElement;
 /** Element-list drawer state (persisted): collapsed by default so properties stay in view. */
 const EL_LIST_KEY = 'pptx.inspector.elList';
 let elListOpen = readStore(EL_LIST_KEY) === '1';
+/** Slide panel view (persisted): thumbnails by default, outline keeps long decks scannable. */
+const SLIDE_VIEW_KEY = 'pptx.panel.slideView';
+let slideView: 'thumb' | 'outline' = readStore(SLIDE_VIEW_KEY) === 'outline' ? 'outline' : 'thumb';
+let slideTabThumbs!: HTMLElement;
+let slideTabOutline!: HTMLElement;
 let elFilter = '';
 let elFilterFocused = false;
 let elFilterNode: HTMLInputElement | null = null;
@@ -240,24 +249,44 @@ function buildLayout() {
 
   const newSlide = () => runAction(() => actions.addSlide());
 
-  // Slide list
+  // Slide list — the panel is virtualized, so rows are drawn only when they scroll near the view.
   slideListEl = h('div', { class: 'sp-list' });
+  slideListEl.addEventListener('scroll', () => scheduleThumbFlush(), { passive: true });
   slideListEl.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    const thumb = (e.target as HTMLElement).closest('.thumb') as HTMLElement | null;
+    // Outline rows get the same slide menu as thumbnails.
+    const thumb = (e.target as HTMLElement).closest('.thumb, .ol-row') as HTMLElement | null;
     if (!thumb) return;
     const idx = Array.prototype.indexOf.call(slideListEl.children, thumb);
     if (idx < 0) return;
     showSlideCtxMenu(e.clientX, e.clientY, idx);
   });
-  const spTitle = h('span', {}, [t('panel.slides')]);
+  const spTitle = h('span', { class: 'sp-title' }, [t('panel.slides')]);
   // `edit-only`: the slide list is read-only in preview mode, so adding a slide must be hidden there.
   const spNewBtn = h('button', { class: 'btn sp-new edit-only', type: 'button', onclick: newSlide }, [icon('newSlide', 14)]);
+  // View tabs: thumbnails vs a text outline. Both stay available in preview mode (read-only).
+  slideTabThumbs = h('button', {
+    class: 'sp-tab' + (slideView === 'thumb' ? ' on' : ''),
+    type: 'button',
+    title: t('panel.tabThumbs'),
+    onclick: () => setSlideView('thumb')
+  }, [t('panel.tabThumbs')]);
+  slideTabOutline = h('button', {
+    class: 'sp-tab' + (slideView === 'outline' ? ' on' : ''),
+    type: 'button',
+    title: t('panel.tabOutline'),
+    onclick: () => setSlideView('outline')
+  }, [t('panel.tabOutline')]);
+  const spTabs = h('div', { class: 'sp-tabs' }, [slideTabThumbs, slideTabOutline]);
   localize(() => {
     spTitle.textContent = t('panel.slides');
     spNewBtn.title = t('panel.newSlide');
+    slideTabThumbs.textContent = t('panel.tabThumbs');
+    slideTabThumbs.title = t('panel.tabThumbs');
+    slideTabOutline.textContent = t('panel.tabOutline');
+    slideTabOutline.title = t('panel.tabOutline');
   });
-  const spHead = h('div', { class: 'sp-head' }, [spTitle, spNewBtn]);
+  const spHead = h('div', { class: 'sp-head' }, [spTitle, spTabs, spNewBtn]);
   const slidesPanel = h('div', { class: 'slides-panel' }, [spHead, slideListEl]);
 
   // Canvas: frame + overlay share one scaled coordinate space
@@ -580,6 +609,9 @@ function ribbonCommands(name: string, ...args: any[]): any {
     case 'table': return insertTable();
     case 'chart': return insertChart();
     case 'media': return openMediaDialog({ addMedia });
+    case 'exportImage': return exportCurrentImage();
+    case 'exportImages': return exportAllImages();
+    case 'exportPdf': return exportPdf();
 
     // --- slides ---
     case 'newSlide': return runAction(() => actions.addSlide(args[0]));
@@ -704,6 +736,73 @@ function addAnimationFromRibbon(pick: any) {
       trigger: pick.trigger
     })
   );
+}
+
+// ---------- Export (PNG / PDF, rasterized offscreen from the editor model) ----------
+
+/** Editor document for export: the live model when loaded, otherwise a throwaway parse. */
+async function ensureExportDoc(): Promise<any> {
+  if (store.doc?.slides?.length) return store.doc;
+  const bytes = state.latest || state.original;
+  if (!bytes) return null;
+  const standard = await pptxToStandard(bytes, PARSE_OPTS);
+  return docFromPptx(standard, { fileName: state.title });
+}
+
+function baseName(title: string): string {
+  return String(title || 'slides').replace(/\.pptx$/i, '');
+}
+
+async function exportSlides(indices: number[], pixelRatio = 2): Promise<ExportedSlide[] | null> {
+  const doc = await ensureExportDoc();
+  if (!doc || !doc.slides?.length) return null;
+  const safe = indices.filter((i) => i >= 0 && i < doc.slides.length);
+  if (!safe.length) return null;
+  toast(t('toast.exporting'));
+  try {
+    return await exportSlidesToPng({ doc, indices: safe, pixelRatio });
+  } catch (e: any) {
+    toast(t('toast.exportFailed', e?.message || String(e)), 'error');
+    return null;
+  }
+}
+
+async function exportCurrentImage(): Promise<void> {
+  const out = await exportSlides([state.current]);
+  if (!out?.length) return;
+  post({
+    type: 'exportImage',
+    bytes: base64Of(out[0].png),
+    suggestedName: `${baseName(state.title)}-${state.current + 1}.png`
+  });
+}
+
+async function exportAllImages(): Promise<void> {
+  const doc = await ensureExportDoc();
+  if (!doc) return;
+  const out = await exportSlides(doc.slides.map((_: any, i: number) => i));
+  if (!out?.length) return;
+  post({
+    type: 'exportImages',
+    images: out.map((s) => ({
+      name: `${baseName(state.title)}-${String(s.index + 1).padStart(2, '0')}.png`,
+      bytes: base64Of(s.png)
+    }))
+  });
+}
+
+async function exportPdf(): Promise<void> {
+  const doc = await ensureExportDoc();
+  if (!doc) return;
+  const out = await exportSlides(doc.slides.map((_: any, i: number) => i));
+  if (!out?.length) return;
+  post({
+    type: 'exportPdf',
+    images: out.map((s) => ({ bytes: base64Of(s.png) })),
+    widthPx: doc.slideSize.width,
+    heightPx: doc.slideSize.height,
+    suggestedName: `${baseName(state.title)}.pdf`
+  });
 }
 
 // ---------- Preview pipeline (pptxToHtml: most faithful rendering) ----------
@@ -899,6 +998,30 @@ function applyTextStyle(patch: Record<string, unknown>): void {
   });
 }
 
+/**
+ * 段落样式改写（左/右缩进、悬挂缩进、段前段后、列表层级）
+ *
+ * 这些属性在 OOXML 里是段落级的（a:pPr@marL/marR/indent、a:spcBef/a:spcAft、a:pPr@lvl），
+ * 编辑模型把它们放在每个段落对象上，故按段逐个写入；值为 undefined 表示清除（回到继承值）。
+ * 单位：px（编辑模型内部单位，导出时由 parser 转成 pt）。
+ */
+function applyParagraphStyle(patch: Record<string, unknown>): void {
+  runAction(() => {
+    store.update((doc: any) => {
+      for (const id of store.sel.slice()) {
+        const el = findInDoc(doc, id);
+        if (!el || el.type !== 'text') continue;
+        for (const p of el.paragraphs || []) {
+          for (const [k, v] of Object.entries(patch)) {
+            if (v === undefined) delete p[k];
+            else p[k] = v;
+          }
+        }
+      }
+    });
+  });
+}
+
 // ---------- Mode switching ----------
 async function toggleMode() {
   await setMode(state.mode === 'preview' ? 'edit' : 'preview');
@@ -1043,42 +1166,338 @@ function slideCount(): number {
 /**
  * Slide panel. Thumbnails can be dragged to reorder (edit mode), show their number and a
  * hidden-slide marker, and double-click jumps straight into edit mode from preview.
+ *
+ * Virtualized: every slide keeps a row placeholder (so scroll height, ordering and the
+ * `slideListEl.children[i]` mapping that drag-reorder / context menus rely on stay correct),
+ * but only rows near the viewport are drawn; the rest fill in on scroll, and a row is redrawn
+ * only when its slide object actually changed. Rebuilding all thumbnails on every edit
+ * measured ~318ms per navigation on a 21-slide deck.
  */
-function renderSlideList() {
+const THUMB_OVERSCAN = 2;
+const thumbRows: HTMLElement[] = [];
+const thumbRev: any[] = [];
+let thumbObserver: IntersectionObserver | null = null;
+let thumbEpoch = '';
+/** Rows currently near the viewport, maintained by the observer. */
+const visibleThumbs = new Set<number>();
+
+/** Uniform row height: every slide shares the deck's aspect ratio, so width fixes the height. */
+function thumbRowHeight(): number {
+  const W = state.slideSize.width || 1280;
+  const H = state.slideSize.height || 720;
+  const cs = getComputedStyle(slideListEl);
+  const pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  let boxW = (slideListEl.clientWidth || 168) - pad;
+  if (boxW <= 0) boxW = 168; // panel not laid out yet
+  return Math.max(24, Math.round(H * (boxW / W)));
+}
+
+/** Vertical gap between rows, read from CSS so it never drifts from the stylesheet. */
+function thumbGap(): number {
+  const cs = getComputedStyle(slideListEl);
+  const g = parseFloat(cs.rowGap || cs.gap || '');
+  return Number.isFinite(g) ? g : 6;
+}
+
+/** Cheap deck-structure key: a change here invalidates every cached row. */
+function deckKey(): string {
+  if (state.mode === 'edit') return 'e:' + store.doc.slides.map((s: any) => s.id || '').join(',');
+  return 'p:' + state.version + ':' + (state.preview?.slides.length || 0);
+}
+
+/** Drop all cached rows (document reload, mode switch, or structural edit). */
+function resetThumbRows(): void {
   slideListEl.innerHTML = '';
-  const count = slideCount();
-  const editing = state.mode === 'edit';
-  for (let i = 0; i < count; i++) {
-    const hidden = editing && !!store.doc.slides[i]?.hidden;
-    const thumb = h('div', {
-      class: 'thumb' + (i === state.current ? ' active' : '') + (hidden ? ' hidden-slide' : ''),
-      title: t('panel.slideThumb', i + 1) + (hidden ? ' · ' + t('panel.hiddenSlide') : ''),
-      draggable: 'false'
-    });
-    if (editing) {
-      renderThumbInto(thumb, store.doc.slides[i], store.doc);
-    } else {
-      const htmls = state.preview?.slides || [];
-      const scale = (thumb.clientWidth || 160) / state.slideSize.width;
-      const inner = h('div', { class: 'inner' });
-      inner.style.width = state.slideSize.width + 'px';
-      inner.style.height = state.slideSize.height + 'px';
-      inner.style.transform = `scale(${scale})`;
-      inner.innerHTML = htmls[i] || '';
-      thumb.style.height = Math.round(state.slideSize.height * scale) + 'px';
-      thumb.appendChild(inner);
+  thumbRows.length = 0;
+  thumbRev.length = 0;
+  visibleThumbs.clear();
+}
+
+function ensureThumbObserver(): void {
+  if (thumbObserver) return;
+  thumbObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const i = thumbRows.indexOf(e.target as HTMLElement);
+      if (i < 0) continue;
+      if (e.isIntersecting) {
+        visibleThumbs.add(i);
+        ensureThumbContent(i, state.mode === 'edit', false);
+      } else visibleThumbs.delete(i);
     }
-    thumb.append(h('span', { class: 'num' }, [String(i + 1)]));
-    if (hidden) thumb.append(h('span', { class: 'hide-badge', title: t('panel.hiddenSlide') }, ['🚫']));
-    thumb.addEventListener('click', () => {
+  }, { root: slideListEl, rootMargin: '300px 0px' });
+}
+
+/** One placeholder row per slide, in slide order, with the drag wiring attached once. */
+function syncThumbRows(count: number, editing: boolean): void {
+  while (thumbRows.length > count) {
+    const row = thumbRows.pop();
+    thumbRev.pop();
+    if (row) { if (thumbObserver) thumbObserver.unobserve(row); row.remove(); }
+  }
+  while (thumbRows.length < count) {
+    const i = thumbRows.length;
+    const row = h('div', { class: 'thumb', draggable: 'false' });
+    row.addEventListener('click', () => {
       if (dragMoved) return; // the gesture was a reorder, not a selection
       selectSlide(i);
     });
-    thumb.addEventListener('dblclick', () => {
+    row.addEventListener('dblclick', () => {
       if (state.mode !== 'edit' && store.doc.slides.length) toggleMode();
     });
-    if (editing) enableThumbDrag(thumb, i);
-    slideListEl.append(thumb);
+    if (editing) enableThumbDrag(row, i);
+    slideListEl.append(row);
+    thumbRows.push(row);
+    thumbRev.push(undefined);
+    if (thumbObserver) thumbObserver.observe(row);
+  }
+}
+
+/** Cheap per-row sync: selection ring + hidden marker. Runs for every row, draws nothing. */
+function updateThumbRow(i: number, editing: boolean): void {
+  const row = thumbRows[i];
+  if (!row) return;
+  const hidden = editing && !!store.doc.slides[i]?.hidden;
+  row.classList.toggle('active', i === state.current);
+  row.classList.toggle('hidden-slide', !!hidden);
+  row.title = t('panel.slideThumb', i + 1) + (hidden ? ' · ' + t('panel.hiddenSlide') : '');
+}
+
+/** Redraw a row only when the slide it shows has changed. */
+function ensureThumbContent(i: number, editing: boolean, force: boolean): void {
+  const row = thumbRows[i];
+  if (!row) return;
+  const slide = editing ? store.doc.slides[i] : null;
+  // `store.update` clones the whole document, so identity changes exactly when content does.
+  const key: any = editing ? slide : `p:${state.version}:${i}`;
+  updateThumbRow(i, editing);
+  if (!force && thumbRev[i] === key) return;
+  thumbRev[i] = key;
+  row.innerHTML = '';
+  if (editing) {
+    if (!slide) return; // index out of range (transient during structural edits)
+    renderThumbInto(row, slide, store.doc);
+  } else {
+    const htmls = state.preview?.slides || [];
+    const W = state.slideSize.width, H = state.slideSize.height;
+    const scale = (row.clientWidth || 160) / W;
+    const inner = h('div', { class: 'inner' });
+    inner.style.width = `${W}px`;
+    inner.style.height = `${H}px`;
+    inner.style.transform = `scale(${scale})`;
+    inner.innerHTML = htmls[i] || '';
+    row.style.height = `${Math.round(H * scale)}px`;
+    row.appendChild(inner);
+  }
+  row.append(h('span', { class: 'num' }, [String(i + 1)]));
+  if (editing && !!slide?.hidden) {
+    row.append(h('span', { class: 'hide-badge', title: t('panel.hiddenSlide') }, ['🚫']));
+  }
+}
+
+function flushThumbWindow(editing: boolean, force = false): void {
+  const count = thumbRows.length;
+  if (!count) return;
+  // Created lazily: the observer's root is the panel, which only gets laid out once mounted.
+  ensureThumbObserver();
+  const key = deckKey();
+  if (key !== thumbEpoch) { thumbEpoch = key; thumbRev.length = 0; }
+  const rowH = thumbRowHeight();
+  for (let i = 0; i < count; i++) {
+    thumbRows[i].style.height = `${rowH}px`;
+    // Selection / hidden state must stay correct even for rows scrolled out of view.
+    updateThumbRow(i, editing);
+  }
+
+  // The observer drives lazy drawing; on the first flush (or while the panel has no layout yet)
+  // there is no observer data, so fall back to a window around the current slide.
+  const anchors = new Set<number>(visibleThumbs);
+  if (!anchors.size) {
+    const gap = thumbGap();
+    const step = rowH + gap;
+    const top = slideListEl.scrollTop;
+    const view = slideListEl.clientHeight || rowH * 6;
+    const first = Math.max(0, Math.floor((top + gap) / step) - THUMB_OVERSCAN);
+    const last = Math.min(count - 1, Math.ceil((top + view) / step) + THUMB_OVERSCAN);
+    for (let i = first; i <= last; i++) anchors.add(i);
+  }
+  for (const i of anchors) ensureThumbContent(i, editing, force);
+  // The active slide can be scrolled out of view — keep its thumbnail current anyway.
+  ensureThumbContent(state.current, editing, force);
+}
+
+/** Coalesce scroll bursts into a single flush per frame. */
+let thumbFlushRaf = 0;
+function scheduleThumbFlush(): void {
+  if (thumbFlushRaf) return;
+  thumbFlushRaf = requestAnimationFrame(() => {
+    thumbFlushRaf = 0;
+    if (slideView === 'thumb') flushThumbWindow(state.mode === 'edit', false);
+  });
+}
+
+function renderSlideList() {
+  const count = slideCount();
+  const editing = state.mode === 'edit';
+  // Outline mode replaces the thumbnails with one text row per slide; rows keep the same
+  // click / right-click behaviour, only the presentation differs.
+  slideListEl.classList.toggle('ol-mode', slideView === 'outline');
+  if (slideView === 'outline') {
+    resetThumbRows();
+    renderOutlineList(count, editing);
+    return;
+  }
+  syncThumbRows(count, editing);
+  flushThumbWindow(editing);
+}
+
+/** Switch the slide panel between thumbnails and the text outline (the choice is remembered). */
+function setSlideView(view: 'thumb' | 'outline'): void {
+  if (slideView === view) return;
+  slideView = view;
+  writeStore(SLIDE_VIEW_KEY, view === 'outline' ? 'outline' : 'thumb');
+  slideTabThumbs.classList.toggle('on', view === 'thumb');
+  slideTabOutline.classList.toggle('on', view === 'outline');
+  renderSlideList();
+}
+
+/** Flatten an element's paragraphs into text (soft breaks become spaces). */
+function textOfElement(el: any): string {
+  const parts: string[] = [];
+  for (const p of el.paragraphs || []) {
+    parts.push((p.runs || []).map((r: any) => (r.break ? ' ' : r.text || '')).join(''));
+  }
+  return parts.join('\n').replace(/[ \t]+/g, ' ').trim();
+}
+
+/**
+ * Slide title heuristic: the largest-font text block wins. The editor model carries no
+ * placeholder metadata, so this mirrors what the parser does elsewhere when it derives a
+ * title from a slide (`pptxToBlocks` picks the max-font-size text box).
+ */
+function slideTitleFromDoc(slide: any): string {
+  let best = '';
+  let bestSize = -1;
+  if (!slide) return best;
+  for (const el of slide.elements || []) {
+    if (el.hidden) continue;
+    const txt = textOfElement(el);
+    if (!txt) continue;
+    let size = Number(el.fontSize) || 0;
+    for (const p of el.paragraphs || []) {
+      for (const r of p.runs || []) size = Math.max(size, Number(r.fontSize) || 0);
+    }
+    if (size > bestSize) {
+      bestSize = size;
+      best = txt;
+    }
+  }
+  return best ? best.split('\n')[0].slice(0, 80) : '';
+}
+
+/** Preview mode has no editor model, so its titles come from the rendered HTML (cached per render). */
+let previewTitleCache: { src: any; titles: string[] } | null = null;
+function previewTitles(): string[] {
+  const src = state.preview;
+  if (!src) return [];
+  if (previewTitleCache && previewTitleCache.src === src) return previewTitleCache.titles;
+  const titles = (src.slides || []).map(titleFromHtml);
+  previewTitleCache = { src, titles };
+  return titles;
+}
+
+/** Largest inline `font-size` text in a slide's HTML, falling back to its first text run. */
+function titleFromHtml(html: string): string {
+  const cands: { size: number; text: string }[] = [];
+  let fallback = '';
+  try {
+    const doc = new DOMParser().parseFromString(`<div>${html}</div>`, 'text/html');
+    const host = doc.body.firstElementChild as Element | null;
+    if (host) {
+      const walk = (node: Element) => {
+        for (const child of Array.from(node.children)) {
+          const el = child as HTMLElement;
+          const txt = (el.textContent || '').trim();
+          const size = parseFloat(el.style?.fontSize || '') || 0;
+          if (txt) {
+            if (!fallback) fallback = txt;
+            cands.push({ size, text: txt });
+          }
+          walk(el);
+        }
+      };
+      walk(host);
+    }
+  } catch {
+    return '';
+  }
+  if (!cands.length) return '';
+  let max = 0;
+  for (const c of cands) max = Math.max(max, c.size);
+  let best = fallback;
+  if (max > 0) {
+    // A title line is often split into several runs of slightly differing size, so picking the
+    // biggest single run truncates it ("What is" instead of "What is PPTXjs?"). Among the nodes
+    // set at ~the top size, take the longest text — that is the whole line.
+    const near = cands.filter((c) => c.size >= max * 0.85);
+    best = near.reduce((a, b) => (b.text.length > a.text.length ? b : a)).text;
+  }
+  return best.replace(/\s+/g, ' ').slice(0, 80);
+}
+
+/**
+ * Exact slide titles in preview mode come from the parser's document model rather than the
+ * rendered HTML: `pptxToHtml` splits one title line into sibling runs ("What is" / "PPTXjs" / "?"),
+ * so any DOM heuristic would read a fragment. The parse is lazy and cached per document bytes.
+ */
+let titleDocCache: { src: Uint8Array; titles: string[] } | null = null;
+async function docTitles(): Promise<string[] | null> {
+  const src = state.latest;
+  if (!src) return null;
+  if (titleDocCache && titleDocCache.src === src) return titleDocCache.titles;
+  try {
+    const standard = await pptxToStandard(src, PARSE_OPTS);
+    const titles = docFromPptx(standard, { fileName: state.title }).slides.map((s: any) => slideTitleFromDoc(s));
+    titleDocCache = { src, titles };
+    return titles;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Outline rows: slide number + title. Rows are far cheaper to scroll than rendered thumbnails,
+ * which is what makes a deck with dozens of slides navigable in a narrow panel.
+ */
+function renderOutlineList(count: number, editing: boolean): void {
+  if (editing) {
+    paintOutlineRows(count, true, (store.doc.slides || []).map((s: any) => slideTitleFromDoc(s)));
+    return;
+  }
+  // Paint straight away from the rendered HTML, then refine to the exact model titles.
+  paintOutlineRows(count, false, previewTitles());
+  void docTitles().then((list) => {
+    // Drop a stale load: the view may have changed while the parse was running.
+    if (slideView !== 'outline' || state.mode === 'edit' || !list) return;
+    paintOutlineRows(slideCount(), false, list);
+  });
+}
+
+function paintOutlineRows(count: number, editing: boolean, titles: string[]): void {
+  slideListEl.innerHTML = '';
+  for (let i = 0; i < count; i++) {
+    const slide = editing ? store.doc.slides[i] : null;
+    const hidden = editing && !!slide?.hidden;
+    const raw = titles[i] || '';
+    const row = h('div', {
+      class: 'ol-row' + (i === state.current ? ' active' : '') + (hidden ? ' hidden-slide' : ''),
+      title: raw || t('panel.slideThumb', i + 1)
+    });
+    row.append(h('span', { class: 'ol-num' }, [String(i + 1)]));
+    row.append(h('span', { class: 'ol-text' }, [raw || t('panel.untitled')]));
+    if (editing && slide?.notes) row.append(h('span', { class: 'ol-notes', title: t('panel.hasNotes') }, ['N']));
+    if (hidden) row.append(h('span', { class: 'hide-badge', title: t('panel.hiddenSlide') }, ['🚫']));
+    row.addEventListener('click', () => selectSlide(i));
+    slideListEl.append(row);
   }
 }
 
@@ -1691,8 +2110,34 @@ function onCanvasDblClick(e: MouseEvent) {
   else if (el.type === 'image') pickImage();
   else if (el.type === 'table') editTable(el.id);
   else if (el.type === 'chart') editChart(el.id);
+  else if (el.type === 'diagram') editDiagramText(el.id);
   else if (el.type === 'video' || el.type === 'audio') toast(t('toast.mediaNotPlayable'));
   // other element types (line, connector, picture, shape without text) have no inline text
+}
+
+/**
+ * SmartArt 文字编辑。
+ * 图示文字同时存在于数据部件（ppt/diagrams/dataN.xml）与缓存绘图部件（drawingN.xml），
+ * 只改内存里的 texts 不会写进文件，故交给 parser 的 updateDiagramTexts 同步改写两处部件。
+ */
+function editDiagramText(id: string) {
+  const el = store.findElement(id);
+  if (!el || el.type !== 'diagram') return;
+  const texts: string[] = Array.isArray(el.texts) ? el.texts.map((v: any) => String(v ?? '')) : [];
+  if (!texts.length) {
+    toast(t('insp.diagramHint'));
+    return;
+  }
+  openDiagramTextDialog(texts, {
+    save: (next) =>
+      runAction(() => {
+        store.update((doc: any) => {
+          const elx = findInDoc(doc, id);
+          if (!elx) return;
+          updateDiagramTexts(elx, next);
+        });
+      })
+  });
 }
 
 /** Open the table editor against the freshest model state. */
@@ -2233,7 +2678,9 @@ function renderElementInspector(el: any) {
   geom.append(numField(t('insp.x'), el.x, (v) => update({ x: v })));
   geom.append(numField(t('insp.y'), el.y, (v) => update({ y: v })));
   geom.append(numField(t('insp.w'), el.width, (v) => update({ width: Math.max(1, v) })));
-  geom.append(numField(t('insp.h'), el.height, (v) => update({ height: Math.max(1, v) })));
+  // 线/连接符允许 0 尺寸（水平线/垂直线是合法几何）
+  const isLineEl = isLineElement(el);
+  geom.append(numField(t('insp.h'), el.height, (v) => update({ height: isLineEl ? Math.max(0, v) : Math.max(1, v) })));
   geom.append(numField(t('insp.rotation'), el.rotation, (v) => update({ rotation: v })));
   inspectorEl.append(geom);
 
@@ -2290,6 +2737,50 @@ function renderElementInspector(el: any) {
           }));
           actions.updateElement(el.id, { paragraphs: paras });
         })
+      )
+    );
+
+    // ---- 段落属性（缩进 / 段距 / 列表层级）----
+    // 取第一段的属性作为面板显示值（多段文本统一改写时以第一段为准）
+    const p0: any = (el.paragraphs || [])[0] || {};
+    inspectorEl.append(h('h4', {}, [t('insp.paragraph')]));
+    inspectorEl.append(numField(t('insp.indentLeft'), p0.indentLeft ?? 0, (v) => applyParagraphStyle({ indentLeft: Math.max(0, v) })));
+    inspectorEl.append(numField(t('insp.indentRight'), p0.indentRight ?? 0, (v) => applyParagraphStyle({ indentRight: Math.max(0, v) })));
+    inspectorEl.append(numField(t('insp.hangingIndent'), p0.indent ?? 0, (v) => applyParagraphStyle({ indent: v })));
+    inspectorEl.append(numField(t('insp.spaceBefore'), p0.spaceBefore ?? 0, (v) => applyParagraphStyle({ spaceBefore: Math.max(0, v) })));
+    inspectorEl.append(numField(t('insp.spaceAfter'), p0.spaceAfter ?? 0, (v) => applyParagraphStyle({ spaceAfter: Math.max(0, v) })));
+    // 列表层级（a:pPr@lvl）：0 为第一级，面板按 1 起显示
+    const curLevel = Number(p0.level || 0);
+    inspectorEl.append(
+      selectField(
+        t('insp.listLevel'),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => ({ value: String(n - 1), label: String(n) })),
+        String(curLevel),
+        (v) => applyParagraphStyle({ level: Number(v) })
+      )
+    );
+    inspectorEl.append(
+      h('div', { class: 'row' }, [
+        h('button', { class: 'btn', type: 'button', onclick: () => applyParagraphStyle({ level: Math.max(0, curLevel - 1) }) }, [t('insp.promote')]),
+        h('button', { class: 'btn', type: 'button', onclick: () => applyParagraphStyle({ level: Math.min(8, curLevel + 1) }) }, [t('insp.demote')])
+      ])
+    );
+
+    // ---- 文本框内边距与自动适应（元素级，a:bodyPr）----
+    const inset: any = el.inset && typeof el.inset === 'object' ? el.inset : {};
+    inspectorEl.append(h('h4', {}, [t('insp.textPadding')]));
+    const padRow = h('div', {});
+    padRow.append(numField(t('insp.left'), inset.l ?? 0, (v) => update({ inset: { ...inset, l: Math.max(0, v) } })));
+    padRow.append(numField(t('insp.right'), inset.r ?? 0, (v) => update({ inset: { ...inset, r: Math.max(0, v) } })));
+    padRow.append(numField(t('insp.top'), inset.t ?? 0, (v) => update({ inset: { ...inset, t: Math.max(0, v) } })));
+    padRow.append(numField(t('insp.bottom'), inset.b ?? 0, (v) => update({ inset: { ...inset, b: Math.max(0, v) } })));
+    inspectorEl.append(padRow);
+    inspectorEl.append(
+      selectField(
+        t('insp.autofit'),
+        ['none', 'normal', 'shape'].map((v) => ({ value: v, label: data('autofit', v, v) })),
+        el.autofit || 'none',
+        (v) => update({ autofit: v })
       )
     );
   } else if (el.type === 'shape') {
@@ -2430,6 +2921,15 @@ function renderElementInspector(el: any) {
     inspectorEl.append(checkField(t('insp.dataLabels'), !!el.dataLabels, (v) => update({ dataLabels: v })));
     inspectorEl.append(h('div', { class: 'row' }, [h('button', { class: 'btn', type: 'button', onclick: () => editChart(el.id) }, [t('insp.editData')])]));
     inspectorEl.append(h('div', { class: 'empty' }, [t('insp.chartHint')]));
+  } else if (el.type === 'diagram') {
+    // SmartArt：文字在数据部件与缓存绘图部件里，改动需由 parser 的 updateDiagramTexts 同步写回
+    inspectorEl.append(textField(t('insp.name'), el.name || '', (v) => update({ name: v })));
+    inspectorEl.append(
+      h('div', { class: 'row' }, [
+        h('button', { class: 'btn', type: 'button', onclick: () => editDiagramText(el.id) }, [t('insp.editDiagramText')])
+      ])
+    );
+    inspectorEl.append(h('div', { class: 'empty' }, [t('insp.diagramHint')]));
   } else if (el.type === 'video' || el.type === 'audio') {
     inspectorEl.append(textField(t('insp.name'), el.name || '', (v) => update({ name: v })));
     inspectorEl.append(
@@ -2657,12 +3157,20 @@ function addTextElement() {
   );
 }
 function addShapeElement(shapeType: string, opt: any = {}) {
+  // 线/连接符：没有填充，且初始为水平线（高度 0）
+  // —— 竖直线/水平线用 0 尺寸表达是合法几何，若给个默认高度会变成斜线
+  const isLine = /^(curvedConnector|bentConnector|straightConnector|line)/.test(shapeType);
+  // 连接符（p:cxnSp）才能写 a:stCxn/a:endCxn，从而在 PowerPoint 里跟随形状移动
+  const isConnector = /^(curvedConnector|bentConnector|straightConnector)/.test(shapeType);
   runAction(() =>
     actions.addElement({
       id: newId(), type: 'shape', shapeType,
-      x: 200, y: 200, width: 200, height: 120,
-      fill: opt.fill ?? '#4285f4',
-      line: opt.line ?? { color: '#000', width: 1 },
+      x: 200, y: 200,
+      width: isLine ? 240 : 200,
+      height: isLine ? 0 : 120,
+      fill: opt.fill ?? (isLine ? 'none' : '#4285f4'),
+      line: opt.line ?? { color: '#1f2937', width: 1.5 },
+      ...(isConnector ? { connector: true } : {}),
       ...(opt.name ? { name: opt.name } : {})
     })
   );

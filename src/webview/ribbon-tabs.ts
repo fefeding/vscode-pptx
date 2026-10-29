@@ -417,6 +417,13 @@ export function buildTabs(b: RibbonBuilders, api: RibbonApi): RibbonTab[] {
       [b.miniButton({ ico: 'grid', title: t('cmd.grid'), needs: 'edit', active: (s) => s.grid, onClick: () => api.cmd('grid') })],
       [b.miniButton({ ico: 'snap', title: t('cmd.snap'), needs: 'edit', active: (s) => s.snap, onClick: () => api.cmd('snap') })],
       [b.miniButton({ ico: 'notes', title: t('grp.window'), needs: 'edit', onClick: () => api.cmd('toggleInspector') })]
+    ]),
+    b.group(t('grp.export'), [
+      [
+        b.bigButton({ ico: 'picture', label: t('cmd.exportImage'), onClick: () => api.cmd('exportImage') }),
+        b.bigButton({ ico: 'download', label: t('cmd.exportImages'), onClick: () => api.cmd('exportImages') }),
+        b.bigButton({ ico: 'save', label: t('cmd.exportPdf'), onClick: () => api.cmd('exportPdf') })
+      ]
     ])
   ]);
 

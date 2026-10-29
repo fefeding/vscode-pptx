@@ -212,6 +212,34 @@ button { font-family: inherit; }
 .thumb.drop-before { box-shadow: -3px 0 0 var(--accent-2); }
 .thumb.drop-after { box-shadow: 3px 0 0 var(--accent-2); }
 
+/* Slide panel head: title takes the slack so the view tabs and the "new slide" button sit right. */
+.sp-head { gap: 4px; }
+.sp-head > .sp-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-tabs { display: inline-flex; gap: 2px; flex: 0 0 auto; }
+.sp-tab {
+  background: transparent; border: 1px solid transparent; border-radius: 4px;
+  color: var(--muted); cursor: pointer; font-size: 11px; font-family: inherit; padding: 2px 5px;
+}
+.sp-tab:hover { background: var(--panel-2); }
+.sp-tab.on { background: var(--accent-bg); border-color: var(--accent-2); color: var(--text); }
+
+/* Outline view: one compact row per slide (number + title) — cheap to scroll through long decks. */
+.sp-list.ol-mode { gap: 1px; padding: 4px; }
+.ol-row {
+  display: flex; align-items: flex-start; gap: 6px; padding: 4px 6px; border-radius: 4px;
+  cursor: pointer; border: 1px solid transparent; font-size: 12px; line-height: 1.35;
+}
+.ol-row:hover { background: var(--panel-2); }
+.ol-row.active { background: var(--accent-bg); border-color: var(--accent-2); }
+.ol-row.hidden-slide { opacity: .55; }
+.ol-row .ol-num {
+  flex: 0 0 auto; min-width: 16px; text-align: right;
+  color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.ol-row.hidden-slide .ol-num { text-decoration: line-through; }
+.ol-row .ol-text { flex: 1 1 auto; min-width: 0; word-break: break-word; }
+.ol-row .ol-notes { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
+
 .canvas-area { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; background: var(--vscode-editor-background, #161616); }
 /* Center via margin:auto on the child (.stage) instead of the flex container:
    a centered flex item that overflows the viewport makes the top/left unreachable by scrolling. */

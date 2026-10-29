@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { PDFDocument } from 'pdf-lib';
 import { PptxCustomDocument } from './pptx-document';
 import type { EditorMode, HostToWebview, WebviewToHost } from './protocol';
 
@@ -119,6 +120,15 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
           case 'saveAs':
             await this.saveAs(document, message.bytes);
             break;
+          case 'exportImage':
+            await this.saveImageFile(document, message);
+            break;
+          case 'exportImages':
+            await this.saveImageFiles(document, message);
+            break;
+          case 'exportPdf':
+            await this.savePdf(document, message);
+            break;
           case 'revert':
             await document.revert();
             await sendInit();
@@ -184,6 +194,65 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     if (bytes) document.setBytes(bytes);
     await document.save(uri);
     vscode.window.showInformationMessage(loc('extension.exported', 'Exported copy: {0}', uri.fsPath));
+  }
+
+  // ---- Export targets (PNG / PDF): the webview renders slides offscreen, the host writes files ----
+
+  private async saveImageFile(
+    document: PptxCustomDocument,
+    msg: { bytes: string; suggestedName: string }
+  ): Promise<void> {
+    const uri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.joinPath(document.uri, '..', msg.suggestedName || 'slide.png'),
+      filters: { 'PNG': ['png'] }
+    });
+    if (!uri) return;
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(msg.bytes, 'base64'));
+    vscode.window.showInformationMessage(loc('extension.imageSaved', 'Image saved: {0}', uri.fsPath));
+  }
+
+  private async saveImageFiles(
+    document: PptxCustomDocument,
+    msg: { images: { name: string; bytes: string }[] }
+  ): Promise<void> {
+    const folders = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      defaultUri: vscode.Uri.joinPath(document.uri, '..'),
+      openLabel: loc('extension.chooseFolder', 'Choose Folder')
+    });
+    if (!folders?.length) return;
+    const dir = folders[0];
+    for (const img of msg.images) {
+      await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(dir, img.name), Buffer.from(img.bytes, 'base64'));
+    }
+    vscode.window.showInformationMessage(
+      loc('extension.imagesSaved', 'Saved {0} images to {1}', String(msg.images.length), dir.fsPath)
+    );
+  }
+
+  private async savePdf(
+    document: PptxCustomDocument,
+    msg: { images: { bytes: string }[]; widthPx: number; heightPx: number; suggestedName: string }
+  ): Promise<void> {
+    if (!msg.images?.length) return;
+    const pdf = await PDFDocument.create();
+    // px → pt (1px = 0.75pt, the same conversion the parser uses elsewhere)
+    const w = (msg.widthPx || 1280) * 0.75;
+    const h = (msg.heightPx || 720) * 0.75;
+    for (const img of msg.images) {
+      const embedded = await pdf.embedPng(Buffer.from(img.bytes, 'base64'));
+      const page = pdf.addPage([w, h]);
+      page.drawImage(embedded, { x: 0, y: 0, width: w, height: h });
+    }
+    const uri = await vscode.window.showSaveDialog({
+      defaultUri: vscode.Uri.joinPath(document.uri, '..', msg.suggestedName || 'slides.pdf'),
+      filters: { 'PDF': ['pdf'] }
+    });
+    if (!uri) return;
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(await pdf.save()));
+    vscode.window.showInformationMessage(loc('extension.pdfSaved', 'PDF saved: {0}', uri.fsPath));
   }
 
   public async revertActive(): Promise<void> {

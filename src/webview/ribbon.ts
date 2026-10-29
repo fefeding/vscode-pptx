@@ -354,6 +354,9 @@ export function createRibbon(api: RibbonApi): { root: HTMLElement; sync(s: Ribbo
       { type: 'item', label: t('cmd.fit'), icon: 'fit', onClick: () => api.cmd('zoom', 'fit') },
       { type: 'item', label: t('cmd.zoomActual'), icon: 'slideSize', onClick: () => api.cmd('zoom', 'actual') },
       { type: 'sep' },
+      { type: 'item', label: t('cmd.exportImage'), icon: 'picture', onClick: () => api.cmd('exportImage') },
+      { type: 'item', label: t('cmd.exportPdf'), icon: 'save', onClick: () => api.cmd('exportPdf') },
+      { type: 'sep' },
       { type: 'item', label: t('cmd.shortcuts'), icon: 'help', onClick: () => api.cmd('shortcuts') }
     ];
     openMenuAt(previewMenuBtn, items, { minWidth: 210 });

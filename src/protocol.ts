@@ -20,6 +20,12 @@ export type WebviewToHost =
   | { type: 'save' }
   | { type: 'saveAs'; bytes: string | null }
   | { type: 'revert' }
+  /** Save one rendered slide (PNG, base64) — the host owns file dialogs and the filesystem. */
+  | { type: 'exportImage'; bytes: string; suggestedName: string }
+  /** Save every rendered slide into a picked folder. */
+  | { type: 'exportImages'; images: { name: string; bytes: string }[] }
+  /** Host assembles the rendered slide PNGs into a single PDF (pdf-lib lives host-side only). */
+  | { type: 'exportPdf'; images: { bytes: string }[]; widthPx: number; heightPx: number; suggestedName: string }
   /** Surface a webview-side problem (parse/serialize failure) in the host UI. */
   | { type: 'error'; message: string };
 
