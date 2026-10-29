@@ -497,7 +497,7 @@ button { font-family: inherit; }
 .present { position: fixed; inset: 0; background: #000; display: none; align-items: center; justify-content: center; z-index: 88; }
 .present.on { display: flex; }
 .present .stage { box-shadow: none; background: #000; }
-.present .slide-host { position: relative; transform-origin: center center; overflow: hidden; }
+.present .slide-host { position: relative; transform-origin: center center; overflow: hidden; flex: none; }
 /* Stacked layers let the outgoing + incoming slides animate simultaneously for transitions. */
 .present-layer { position: absolute; inset: 0; overflow: hidden; will-change: transform, opacity; }
 .present .slide-host .slide { margin: 0 !important; }
