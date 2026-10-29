@@ -2,6 +2,8 @@
 
 A VSCode extension built on [`@fefeding/ppt-parser`](https://github.com/fefeding/pptx-parser) that lets you **open and edit `.pptx` files visually** — directly inside the editor.
 
+![PPTX editor screenshot](media/screenshot.png)
+
 ## Features
 
 - **Default `.pptx` handler**: Double-click any `.pptx` in the Explorer to open it with the built-in visual editor (no extra software required).
