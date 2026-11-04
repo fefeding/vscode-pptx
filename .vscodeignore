@@ -2,6 +2,7 @@
 .vscode-test/**
 src/**
 examples/**
+scripts/**
 **/__tests__/**
 .gitignore
 .eslintrc.json

@@ -26,6 +26,8 @@ export type WebviewToHost =
   | { type: 'exportImages'; images: { name: string; bytes: string }[] }
   /** Host assembles the rendered slide PNGs into a single PDF (pdf-lib lives host-side only). */
   | { type: 'exportPdf'; images: { bytes: string }[]; widthPx: number; heightPx: number; suggestedName: string }
+  /** Ribbon "Convert Document": ask the host to run the convert command for the active document. */
+  | { type: 'convert' }
   /** Surface a webview-side problem (parse/serialize failure) in the host UI. */
   | { type: 'error'; message: string };
 

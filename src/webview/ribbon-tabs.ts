@@ -422,7 +422,8 @@ export function buildTabs(b: RibbonBuilders, api: RibbonApi): RibbonTab[] {
       [
         b.bigButton({ ico: 'picture', label: t('cmd.exportImage'), onClick: () => api.cmd('exportImage') }),
         b.bigButton({ ico: 'download', label: t('cmd.exportImages'), onClick: () => api.cmd('exportImages') }),
-        b.bigButton({ ico: 'save', label: t('cmd.exportPdf'), onClick: () => api.cmd('exportPdf') })
+        b.bigButton({ ico: 'save', label: t('cmd.exportPdf'), onClick: () => api.cmd('exportPdf') }),
+        b.bigButton({ ico: 'swap', label: t('cmd.convertFormat'), onClick: () => api.cmd('convertFormat') })
       ]
     ])
   ]);

@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { PDFDocument } from 'pdf-lib';
 import { PptxCustomDocument } from './pptx-document';
+import { CONVERT_TARGETS, convertPptxBytes, isPptxPath } from './convert';
+import type { ConvertTargetMeta } from './convert';
 import type { EditorMode, HostToWebview, WebviewToHost } from './protocol';
 
 const VIEW_TYPE = 'pptx-parser.pptxEditor';
@@ -65,6 +67,11 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     };
     webviewPanel.webview.html = this.getWebviewHtml(webviewPanel.webview);
 
+    // Not every host fires onDidChangeViewState when a panel opens. Register right away so
+    // title-bar / ribbon commands can resolve the active document on the first click.
+    this._activeDoc = document;
+    this._activePanel = webviewPanel;
+
     webviewPanel.onDidChangeViewState((e) => {
       if (e.webviewPanel.active) {
         this._activeDoc = document;
@@ -128,6 +135,11 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
             break;
           case 'exportPdf':
             await this.savePdf(document, message);
+            break;
+          case 'convert':
+            // Ribbon button: always convert the document this panel belongs to, never
+            // guess from activeTextEditor (which may be a different file).
+            await this.convertUri(document.uri);
             break;
           case 'revert':
             await document.revert();
@@ -283,6 +295,72 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
     await this.setActiveMode(doc.mode === 'edit' ? 'preview' : 'edit');
   }
 
+  // ---- Document format conversion (PPTX -> docx / pdf / md / html) ----
+
+  /**
+   * Convert a PPTX file into another document format.
+   *
+   * `uri` comes from the Explorer / editor context menus. When invoked from the command
+   * palette or the ribbon we fall back to the active custom editor first (a custom editor
+   * has no activeTextEditor) and then to the active text editor. For the active custom
+   * editor we use its in-memory bytes so unsaved edits are reflected in the output.
+   */
+  public async convertUri(uri?: vscode.Uri): Promise<void> {
+    const active = this._activeDoc;
+    const target = uri || active?.uri || vscode.window.activeTextEditor?.document.uri;
+    if (!target) {
+      vscode.window.showInformationMessage(
+        loc('extension.pickConvert', 'Open a PPTX file or select one in the Explorer to convert it.')
+      );
+      return;
+    }
+    if (!isPptxPath(target.path)) {
+      vscode.window.showWarningMessage(
+        loc('extension.unsupported', 'Document conversion currently supports .pptx files only.')
+      );
+      return;
+    }
+
+    const sourceName = target.path.split('/').pop() || 'presentation.pptx';
+    const base = sourceName.replace(/\.[^.]+$/, '');
+    const items = CONVERT_TARGETS.map((meta) => ({ label: loc(meta.labelKey, meta.label), meta }));
+    const picked = await vscode.window.showQuickPick(items, {
+      placeHolder: loc('extension.convertTo', 'Convert "{0}" to which format?', sourceName),
+      title: loc('extension.convertTitle', 'PPTX: Convert Document Format')
+    });
+    if (!picked) return;
+
+    const meta: ConvertTargetMeta = picked.meta;
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: loc('extension.converting', 'Converting document…') },
+      async () => {
+        try {
+          const fromMemory = !!active && target.toString() === active.uri.toString();
+          const bytes = fromMemory
+            ? Uint8Array.from(Buffer.from(active!.snapshot().bytes, 'base64'))
+            : await vscode.workspace.fs.readFile(target);
+          const result = await convertPptxBytes(bytes, meta.id, base);
+          const dir = target.path.replace(/[^/]+$/, '');
+          const outUri = await vscode.window.showSaveDialog({
+            defaultUri: target.with({ path: dir + base + '.' + meta.ext }),
+            saveLabel: loc('extension.saveResult', 'Save converted file'),
+            filters: meta.filters
+          });
+          if (!outUri) return;
+          const output = typeof result === 'string' ? new TextEncoder().encode(result) : result;
+          await vscode.workspace.fs.writeFile(outUri, output);
+          vscode.window.showInformationMessage(
+            loc('extension.converted', 'Converted and saved: {0}', outUri.fsPath)
+          );
+        } catch (err: any) {
+          vscode.window.showErrorMessage(
+            loc('extension.convertFailed', 'Conversion failed: {0}', String(err?.message || err))
+          );
+        }
+      }
+    );
+  }
+
   private getWebviewHtml(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'dist', 'webview.js')
@@ -341,7 +419,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('pptx-parser.exportCopy', () => provider.exportActive()),
     vscode.commands.registerCommand('pptx-parser.viewMode', () => provider.setActiveMode('preview')),
     vscode.commands.registerCommand('pptx-parser.editMode', () => provider.setActiveMode('edit')),
-    vscode.commands.registerCommand('pptx-parser.toggleMode', () => provider.toggleActiveMode())
+    vscode.commands.registerCommand('pptx-parser.toggleMode', () => provider.toggleActiveMode()),
+    vscode.commands.registerCommand('pptx-parser.convert', (uri?: vscode.Uri) => provider.convertUri(uri))
   );
 }
 

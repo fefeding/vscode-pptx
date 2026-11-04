@@ -2,7 +2,7 @@
   "name": "vscode-pptx",
   "displayName": "PPTX Editor",
   "description": "VSCode PPTX preview and editor extension powered by pptx-parser (default handler for .pptx)",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "publisher": "fefeding",
   "license": "MIT",
   "repository": {
@@ -63,22 +63,63 @@
       {
         "command": "pptx-parser.toggleMode",
         "title": "%command.toggleMode%"
+      },
+      {
+        "command": "pptx-parser.convert",
+        "title": "%command.convert%",
+        "category": "PPTX",
+        "icon": "$(arrow-swap)"
       }
-    ]
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "pptx-parser.convert",
+          "when": "activeCustomEditor == 'pptx-parser.pptxEditor'",
+          "group": "navigation@1"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "pptx-parser.convert",
+          "when": "resourceExtname == '.pptx'",
+          "group": "navigation@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "pptx-parser.convert",
+          "when": "resourceExtname == '.pptx'",
+          "group": "navigation@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "pptx-parser.convert",
+          "when": "resourceExtname == '.pptx'",
+          "group": "navigation@2"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "node esbuild.js --production",
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "dev": "node esbuild.js --watch",
+    "verify:convert": "node scripts/verify-convert.mjs",
     "install:parser": "npm install file:../pptx-parser",
     "package": "vsce package",
     "publish": "vsce publish"
   },
   "dependencies": {
     "@fefeding/ppt-parser": "^1.0.31",
+    "@pdf-lib/fontkit": "^1.1.1",
+    "docx": "^9.12.0",
     "html-to-image": "^1.11.13",
     "jszip": "^3.10.2",
+    "marked": "^18.1.1",
+    "parse5": "^8.0.1",
     "pdf-lib": "^1.17.1",
     "tinycolor2": "^1.6.0"
   },

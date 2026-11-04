@@ -612,6 +612,9 @@ function ribbonCommands(name: string, ...args: any[]): any {
     case 'exportImage': return exportCurrentImage();
     case 'exportImages': return exportAllImages();
     case 'exportPdf': return exportPdf();
+    // Format conversion runs in the extension host (it needs system fonts / Node APIs).
+    // The host already holds the latest PPTX bytes, so unsaved edits are included.
+    case 'convertFormat': post({ type: 'convert' }); return;
 
     // --- slides ---
     case 'newSlide': return runAction(() => actions.addSlide(args[0]));
