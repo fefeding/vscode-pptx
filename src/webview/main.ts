@@ -1349,6 +1349,9 @@ function renderSlideList() {
     renderOutlineList(count, editing);
     return;
   }
+  // Leaving outline: drop the text rows before rebuilding the thumbnails,
+  // otherwise the leftover `.ol-row` elements stay visible alongside them.
+  if (slideListEl.querySelector('.ol-row')) resetThumbRows();
   syncThumbRows(count, editing);
   flushThumbWindow(editing);
 }
