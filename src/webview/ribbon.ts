@@ -19,6 +19,8 @@ import { buildTabs, RibbonTab } from './ribbon-tabs';
 
 export type RibbonState = {
   mode: EditorMode;
+  /** 文档有未保存改动（驱动快速访问栏保存按钮的高亮/小圆点） */
+  dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
   zoom: number;
@@ -418,8 +420,19 @@ export function createRibbon(api: RibbonApi): { root: HTMLElement; sync(s: Ribbo
     miniButton({ ico: 'help', title: withAccel(t('cmd.shortcuts'), '?'), onClick: () => api.cmd('shortcuts') }).el
   ]);
 
+  // 手动保存：VS Code 的 Ctrl+S 会拦截，但 webview 里需要一个可见入口（编辑后尤其需要）。
+  // 未保存时高亮 + 右上角小圆点；按钮始终可点，和 Office 的保存按钮一致。
+  const saveBtn = miniButton({
+    ico: 'save',
+    title: withAccel(t('cmd.save'), 'mod+s'),
+    active: (s) => s.dirty,
+    onClick: () => api.cmd('save')
+  });
+  saveBtn.el.classList.add('rb-save');
+
   const titlebar = h('div', { class: 'rb-titlebar' }, [
     h('div', { class: 'rb-qat' }, [
+      saveBtn.el,
       miniButton({ ico: 'undo', title: withAccel(t('cmd.undo'), 'mod+z'), needs: 'canUndo', onClick: () => api.cmd('undo') }).el,
       miniButton({ ico: 'redo', title: withAccel(t('cmd.redo'), 'mod+y'), needs: 'canRedo', onClick: () => api.cmd('redo') }).el,
       miniButton({ ico: 'present', title: withAccel(t('tbar.present'), 'f5'), onClick: () => api.cmd('present') }).el

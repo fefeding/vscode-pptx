@@ -500,10 +500,12 @@ function currentAnimIndex(): number {
   const anims: any[] = Array.isArray(store.slide?.animations) ? store.slide.animations : [];
   if (animEditIndex >= 0 && animEditIndex < anims.length) return animEditIndex;
   const sel: string[] = store.sel || [];
+  if (!sel.length) return anims.length - 1;
   for (let i = anims.length - 1; i >= 0; i--) {
-    if (!sel.length || sel.includes(anims[i].target)) return i;
+    if (sel.includes(anims[i].target)) return i;
   }
-  return anims.length - 1;
+  // 选中的元素没有动画时不要退回别元素的最后一条，否则参数区会误显示/误改它
+  return -1;
 }
 
 /** 把类型/方向/触发/时长立即写回当前动画，而不是只改「下一次添加」的草稿 */
@@ -513,7 +515,12 @@ function patchCurrentAnim(patch: any): void {
   const idx = currentAnimIndex();
   if (idx < 0 || idx >= anims.length) return;
   animEditIndex = idx;
-  runAction(() => actions.updateAnimation(idx, patch));
+  const next: any = { ...patch };
+  // 类型/类别/方向变了，旧的 OOXML presetID/presetSubtype 必须失效：导出端会优先用它们，
+  // 与 preset 不一致时 PowerPoint 会忽略该动画或仍播旧效果（一直「从左侧飞入」）。
+  if ('type' in next || 'presetClass' in next) next.presetId = undefined;
+  if ('direction' in next) next.presetSubtype = undefined;
+  runAction(() => actions.updateAnimation(idx, next));
 }
 
 function animLabel(a: any): string {
@@ -553,6 +560,7 @@ function ribbonState(): RibbonState {
   const themeId = editing ? (typeof store.doc?.theme === 'string' ? store.doc.theme : 'blue') : '';
   return {
     mode: state.mode,
+    dirty: state.dirty,
     canUndo: editing && store.canUndo(),
     canRedo: editing && store.canRedo(),
     zoom: state.zoom,
@@ -595,6 +603,8 @@ function ribbonCommands(name: string, ...args: any[]): any {
   };
   switch (name) {
     // --- file / app ---
+    // 走宿主的标准保存流程（含保存前的 flush 握手），不要在这里直接写盘
+    case 'save': return post({ type: 'save' });
     case 'undo': return runAction(() => store.undo());
     case 'redo': return runAction(() => store.redo());
     case 'setMode': return setMode(args[0]);
@@ -722,7 +732,7 @@ function ribbonCommands(name: string, ...args: any[]): any {
     case 'addAnim': return addAnimationFromRibbon(args[0]);
     case 'animSelect':
       animEditIndex = Number(args[0]);
-      renderInspector();
+      renderInspector(true);
       ribbon.sync(ribbonState());
       return;
     case 'animPatch': return patchCurrentAnim(args[0]);
@@ -963,11 +973,14 @@ async function syncBytes(dirty: boolean): Promise<void> {
       state.latest = state.original;
       state.dirty = false;
       post({ type: 'sync', bytes: null, dirty: false });
+      syncChrome();
       return;
     }
     state.latest = await serializeDoc();
     state.dirty = true;
     post({ type: 'sync', bytes: toBase64(state.latest), dirty: true });
+    // syncBytes 是防抖后异步执行的，此时 renderAll 早已跑完，必须单独刷新功能区上的保存按钮
+    syncChrome();
   } catch (e: any) {
     post({ type: 'error', message: t('toast.serializeFailed', e?.message || String(e)) });
   } finally {
@@ -2341,26 +2354,31 @@ function syncChrome(): void {
   ribbon.sync(ribbonState());
 }
 
-function renderInspector() {
+function renderInspector(force = false) {
   if (state.mode !== 'edit') {
     inspectorEl.innerHTML = '';
     lastInspSelKey = '';
     return;
   }
+  const selKey = store.sel.join(',');
+  const selectionChanged = selKey !== lastInspSelKey;
+  // 换了元素就必须重建：此时旧面板里的动画参数、几何值全属于上一个元素。
+  if (selectionChanged && !force) animEditIndex = -1;
   if (state.editingText && store.sel.length) return; // don't rebuild while typing (keeps focus)
   // 正在操作面板里的控件（取色器 / 下拉框 / 数字框）时不要重建：
   // 每次 edit 都 renderAll 一次，重建会把控件连同它身上的焦点一起换掉，原生取色器随之
   // 关闭——连续调色只能生效第一下，看着就像「改了颜色但没实时生效」。画布由 renderAll
   // 里的 renderCanvas 独立重绘，不受这里跳过的影响。
+  // 但这个保护只在「同一个选择」时有效：刚在下拉框里设完动画再点画布上另一个元素，
+  // 焦点仍在旧 select 上，若不强制重建，属性面板会一直停留在上一个元素。
   const active = document.activeElement as HTMLElement | null;
-  if (active && inspectorEl.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) {
+  if (!force && !selectionChanged && active && inspectorEl.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) {
     syncChrome();
     return;
   }
   // Re-rendering wipes the DOM, so remember where the panel was scrolled to: property edits must not
   // throw the user back to the top. A *different* selection is a new context and starts at the top.
-  const selKey = store.sel.join(',');
-  const keepScroll = selKey === lastInspSelKey;
+  const keepScroll = !selectionChanged;
   const prevScroll = inspectorEl.scrollTop;
   lastInspSelKey = selKey;
   inspectorEl.innerHTML = '';
@@ -3086,7 +3104,8 @@ function renderElementInspector(el: any) {
     Object.assign(pick, p);
     if (editIdx >= 0 && editIdx < allAnims.length) {
       animEditIndex = editIdx;
-      runAction(() => actions.updateAnimation(editIdx, p));
+      // 走统一入口，改类型时同步清掉过期的 presetID/presetSubtype
+      patchCurrentAnim(p);
     }
   };
   if (!mine.length) inspectorEl.append(h('div', { class: 'empty' }, [t('insp.noAnimOnEl')]));
@@ -3097,7 +3116,7 @@ function renderElementInspector(el: any) {
         style: 'cursor:pointer',
         onclick: () => {
           animEditIndex = x.i;
-          renderInspector();
+          renderInspector(true);
           ribbon.sync(ribbonState());
         }
       }, [

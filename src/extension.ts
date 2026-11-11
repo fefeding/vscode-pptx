@@ -127,9 +127,10 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
             this._pendingFlush?.();
             break;
           case 'save':
-            // Saving is owned by VS Code; this path is only kept for completeness. The actual
-            // dirty-state notification is pushed via the document's onDidSave listener above.
-            await document.save();
+            // 走 VS Code 标准保存：它会调用 saveCustomDocument（含保存前的 flush 握手），
+            // 并正确清除标题栏的未保存标记。直接 document.save() 会绕过 VS Code，导致
+            // 标题栏仍显示未保存。写盘完成后 onDidSave 会把 `saved` 推回 webview。
+            await vscode.commands.executeCommand('workbench.action.files.save');
             break;
           case 'saveAs':
             await this.saveAs(document, message.bytes);
