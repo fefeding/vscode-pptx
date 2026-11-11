@@ -1,0 +1,5 @@
+allowBuilds:
+  '@vscode/vsce-sign': true
+  esbuild: true
+minimumReleaseAgeExclude:
+  - '@fefeding/ppt-parser@1.0.32'
