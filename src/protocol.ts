@@ -17,6 +17,8 @@ export type WebviewToHost =
    * left without any edit (e.g. undo back to the imported state), meaning "keep original".
    */
   | { type: 'sync'; bytes: string | null; dirty: boolean }
+  /** Reply to `flush` when there is nothing to serialize (e.g. preview mode). */
+  | { type: 'flushDone' }
   | { type: 'save' }
   | { type: 'saveAs'; bytes: string | null }
   | { type: 'revert' }
@@ -53,5 +55,7 @@ export type HostToWebview =
   /** Push a preview/edit mode change from the editor title bar (host command) into the webview. */
   | { type: 'setMode'; mode: EditorMode }
   | { type: 'saved' }
+  /** Save is about to happen: serialize any pending edit immediately (beats the 350ms debounce). */
+  | { type: 'flush' }
   | { type: 'reverted' }
   | { type: 'info'; message: string; kind?: 'info' | 'warn' | 'error' };

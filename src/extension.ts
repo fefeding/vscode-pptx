@@ -39,6 +39,9 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
   /** The webview panel of the currently focused document (so title-bar commands can message it). */
   private _activePanel: vscode.WebviewPanel | undefined;
 
+  /** Resolver for a pending "serialize now, before saving" handshake. */
+  private _pendingFlush: (() => void) | null = null;
+
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   async openCustomDocument(
@@ -118,6 +121,10 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
           case 'sync':
             document.setBytes(message.bytes);
             document.setDirty(message.dirty);
+            this._pendingFlush?.();
+            break;
+          case 'flushDone':
+            this._pendingFlush?.();
             break;
           case 'save':
             // Saving is owned by VS Code; this path is only kept for completeness. The actual
@@ -164,7 +171,31 @@ class PptxEditorProvider implements vscode.CustomEditorProvider<PptxCustomDocume
   }
 
   // ---- CustomEditorProvider required methods ----
+  /**
+   * Edits are pushed to the host with a 350ms debounce plus async PPTX serialization. Without
+   * this handshake, Ctrl+S right after an edit can save the *previous* bytes (e.g. an animation
+   * added a moment ago is absent after reopening). Ask the webview to flush and wait for its
+   * `sync` reply (bounded by a timeout so saving never hangs).
+   */
+  private async flushPendingSync(document: PptxCustomDocument): Promise<void> {
+    const panel = this._activeDoc === document ? this._activePanel : undefined;
+    if (!panel) return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this._pendingFlush = null;
+        resolve();
+      }, 2000);
+      this._pendingFlush = () => {
+        clearTimeout(timer);
+        this._pendingFlush = null;
+        resolve();
+      };
+      void panel.webview.postMessage({ type: 'flush' } as HostToWebview);
+    });
+  }
+
   async saveCustomDocument(document: PptxCustomDocument, _token: vscode.CancellationToken): Promise<void> {
+    await this.flushPendingSync(document);
     await document.save();
   }
   async saveCustomDocumentAs(

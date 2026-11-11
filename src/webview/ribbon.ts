@@ -32,6 +32,10 @@ export type RibbonState = {
   sizeKey: string;
   transition: { type: string; duration: number; advanceOnClick: boolean };
   animations: { index: number; text: string }[];
+  /** 动画窗格当前选中的条目（参数控件编辑它）；-1 表示未选中 */
+  animIndex: number;
+  /** 当前选中动画的参数，用于把功能区下拉同步到真实模型值 */
+  animPick: { cls: string; type: string; trigger: string; direction: string; duration: string };
   /** Named capability flags consumed by `needs` (see `ribbonCaps` in main.ts). */
   caps: Record<string, boolean | string>;
 };
@@ -313,12 +317,17 @@ export function createRibbon(api: RibbonApi): { root: HTMLElement; sync(s: Ribbo
           return;
         }
         for (const a of s.animations) {
+          // 点选一条后，右侧参数控件（类型/方向/触发/时长）会直接修改它
           el.append(
-            h('div', { class: 'rb-anim-row' }, [
+            h('div', {
+              class: 'rb-anim-row' + (a.index === s.animIndex ? ' on' : ''),
+              style: 'cursor:pointer',
+              onclick: () => api.cmd('animSelect', a.index)
+            }, [
               h('span', { class: 'rb-anim-text', title: a.text }, [a.text]),
-              h('button', { class: 'rb-btn rb-btn-mini', title: t('insp.animMoveUp'), onclick: () => api.cmd('animMove', a.index, -1) }, [icon('up', 12)]),
-              h('button', { class: 'rb-btn rb-btn-mini', title: t('insp.animMoveDown'), onclick: () => api.cmd('animMove', a.index, 1) }, [icon('down', 12)]),
-              h('button', { class: 'rb-btn rb-btn-mini', title: t('insp.animRemove'), onclick: () => api.cmd('animRemove', a.index) }, [icon('close', 12)])
+              h('button', { class: 'rb-btn rb-btn-mini', title: t('insp.animMoveUp'), onclick: (e: any) => { e.stopPropagation(); api.cmd('animMove', a.index, -1); } }, [icon('up', 12)]),
+              h('button', { class: 'rb-btn rb-btn-mini', title: t('insp.animMoveDown'), onclick: (e: any) => { e.stopPropagation(); api.cmd('animMove', a.index, 1); } }, [icon('down', 12)]),
+              h('button', { class: 'rb-btn rb-btn-mini', title: t('insp.animRemove'), onclick: (e: any) => { e.stopPropagation(); api.cmd('animRemove', a.index); } }, [icon('close', 12)])
             ])
           );
         }

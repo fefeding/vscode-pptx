@@ -484,8 +484,62 @@ function ribbonCaps(): Record<string, boolean | string> {
   };
 }
 
+/** trigger 在编辑器模型里是字符串，从 PPTX 解析回来可能是 { type } 对象 */
+function normTrigger(t: any): 'onClick' | 'withPrev' | 'afterPrev' {
+  const v = typeof t === 'string' ? t : t?.type;
+  return v === 'onClick' || v === 'withPrev' ? v : 'afterPrev';
+}
+
+/** 当前正在编辑的动画（slide.animations 下标）；-1 表示跟随最后一条 */
+let animEditIndex = -1;
+
+/** 参数控件应编辑哪条动画：显式选中优先，否则取选中元素的最后一条（通常就是刚添加的） */
+function currentAnimIndex(): number {
+  // preview 模式下 store.doc 为 null，而 store.slide 的 getter 会直接读 doc.slides
+  if (state.mode !== 'edit' || !store.doc) return -1;
+  const anims: any[] = Array.isArray(store.slide?.animations) ? store.slide.animations : [];
+  if (animEditIndex >= 0 && animEditIndex < anims.length) return animEditIndex;
+  const sel: string[] = store.sel || [];
+  for (let i = anims.length - 1; i >= 0; i--) {
+    if (!sel.length || sel.includes(anims[i].target)) return i;
+  }
+  return anims.length - 1;
+}
+
+/** 把类型/方向/触发/时长立即写回当前动画，而不是只改「下一次添加」的草稿 */
+function patchCurrentAnim(patch: any): void {
+  if (state.mode !== 'edit') return;
+  const anims: any[] = Array.isArray(store.slide?.animations) ? store.slide.animations : [];
+  const idx = currentAnimIndex();
+  if (idx < 0 || idx >= anims.length) return;
+  animEditIndex = idx;
+  runAction(() => actions.updateAnimation(idx, patch));
+}
+
 function animLabel(a: any): string {
-  return [data('animClass', a.presetClass || 'entr', a.presetClass), data('animType', a.type || '', a.type), data('trigger', a.trigger || 'onClick', a.trigger)].join(' / ');
+  const trig = normTrigger(a.trigger);
+  return [data('animClass', a.presetClass || 'entr', a.presetClass), data('animType', a.type || '', a.type), data('trigger', trig, trig)].join(' / ');
+}
+
+/**
+ * 预览模式没有编辑器模型，动画随 pptxToHtml 的 data-timing 下发。
+ * 重新打开文件默认是预览模式，若动画窗格空白，用户会以为「保存后动画没了」。
+ */
+function previewAnimations(): any[] {
+  const html = state.preview?.slides?.[state.current] || '';
+  const m = html.match(/data-timing='([^']*)'/);
+  if (!m) return [];
+  try {
+    const payload = JSON.parse(m[1]);
+    if (!Array.isArray(payload.animations)) return [];
+    return payload.animations.map((a: any) => ({
+      type: a.type,
+      presetClass: a.presetClass || 'entr',
+      trigger: a.trigger || 'onClick',
+      direction: a.direction,
+      duration: a.duration
+    }));
+  } catch { return []; }
 }
 
 function ribbonState(): RibbonState {
@@ -493,7 +547,9 @@ function ribbonState(): RibbonState {
   // lookup has to go through the mode-aware `slideCount()` instead of `store.slideCount`.
   const editing = state.mode === 'edit';
   const trans: any = (editing && store.slide?.transition) || {};
-  const anims: any[] = editing && Array.isArray(store.slide?.animations) ? store.slide.animations : [];
+  const anims: any[] = editing
+    ? (Array.isArray(store.slide?.animations) ? store.slide.animations : [])
+    : previewAnimations();
   const themeId = editing ? (typeof store.doc?.theme === 'string' ? store.doc.theme : 'blue') : '';
   return {
     mode: state.mode,
@@ -510,6 +566,18 @@ function ribbonState(): RibbonState {
     sizeKey: editing ? store.doc?.sizeKey || '16:9' : '',
     transition: { type: trans.type || 'none', duration: trans.duration ?? 800, advanceOnClick: trans.advanceOnClick !== false },
     animations: anims.map((a, index) => ({ index, text: animLabel(a) })),
+    animIndex: editing ? currentAnimIndex() : -1,
+    animPick: (() => {
+      if (!editing) return { cls: 'entr', type: 'fadeIn', trigger: 'afterPrev', direction: 'l', duration: '500' };
+      const cur: any = anims[currentAnimIndex()] || null;
+      return {
+        cls: cur?.presetClass || 'entr',
+        type: cur?.type || 'fadeIn',
+        trigger: cur ? normTrigger(cur.trigger) : 'afterPrev',
+        direction: cur?.direction || 'l',
+        duration: String(cur?.duration ?? 500)
+      };
+    })(),
     caps: ribbonCaps()
   };
 }
@@ -652,6 +720,12 @@ function ribbonCommands(name: string, ...args: any[]): any {
 
     // --- animations ---
     case 'addAnim': return addAnimationFromRibbon(args[0]);
+    case 'animSelect':
+      animEditIndex = Number(args[0]);
+      renderInspector();
+      ribbon.sync(ribbonState());
+      return;
+    case 'animPatch': return patchCurrentAnim(args[0]);
     case 'animMove': return runAction(() => actions.moveAnimation(args[0], args[1]));
     case 'animRemove': return runAction(() => actions.removeAnimation(args[0]));
 
@@ -729,6 +803,8 @@ function addAnimationFromRibbon(pick: any) {
     toast(t('toast.needSelection'), 'warn');
     return;
   }
+  // 新添加的动画成为参数控件的编辑目标
+  animEditIndex = -1;
   runAction(() =>
     actions.addAnimation({
       target: el.id,
@@ -849,33 +925,12 @@ async function renderPreview(): Promise<void> {
 async function enterEditMode(): Promise<void> {
   const bytes = state.latest;
   if (!bytes || !bytes.length) return;
-  // The pptx round-trip (pptxToStandard -> docFromPptx) corrupts slide animations: it rewrites the
-  // element-id `target` onto the wrong element and drops the `direction`/`trigger` fields, so every
-  // re-parse silently loses them. The live editor model in `store.doc` is authoritative in edit mode,
-  // so snapshot its animations and re-apply them after the (lossy) re-parse. Element ids are regenerated
-  // on every parse, so we key each animation by the *position* of its target element within the slide
-  // and re-map that position onto the freshly parsed slide's elements.
-  const animBackup = (store.doc?.slides || []).map((s: any) => {
-    if (!s.animations || !s.animations.length) return null;
-    return s.animations.map((a: any) => ({
-      anim: a,
-      pos: (s.elements || []).findIndex((e: any) => e.id === a.target)
-    }));
-  });
+  // 动画由 parser 精确保真（p:spTgt@spid ↔ p:cNvPr@id 映射），重新解析即可还原，
+  // 不再需要按元素「位置」猜测并在找不到时退回第一个元素的备份逻辑——那正是动画
+  // 错绑到未设置元素上的原因。
   const standard = await pptxToStandard(bytes, PARSE_OPTS);
   const doc = docFromPptx(standard, { fileName: state.title });
   store.setDoc(doc, { noHistory: true });
-  if (animBackup.length) {
-    doc.slides.forEach((s: any, i: number) => {
-      const b = animBackup[i];
-      if (!b || !b.length) return;
-      const els = s.elements || [];
-      s.animations = b.map(({ anim, pos }: any) => {
-        const el = pos >= 0 && pos < els.length ? els[pos] : els[0];
-        return { ...anim, target: el ? el.id : anim.target };
-      });
-    });
-  }
   store.setSlide(state.current);
   state.slideSize = doc.slideSize || state.slideSize;
   state.current = clamp(state.current, 0, store.slideCount - 1);
@@ -3011,19 +3066,55 @@ function renderElementInspector(el: any) {
   inspectorEl.append(h('h4', {}, [t('insp.animations')]));
   const allAnims: any[] = Array.isArray(store.slide?.animations) ? store.slide.animations : [];
   const mine = allAnims.map((a: any, i: number) => ({ a, i })).filter((x: any) => x.a.target === el.id);
+  // 配置控件编辑「当前选中的动画」，而不是「下一次添加」的草稿。
+  // 旧实现里改类型/方向只改草稿、不动已有动画，于是无论选什么，播放出来永远是最初
+  // 添加的那条默认效果（从左侧飞入）。
+  let editIdx = currentAnimIndex();
+  if (editIdx < 0 || !allAnims[editIdx] || allAnims[editIdx].target !== el.id) {
+    editIdx = mine.length ? mine[mine.length - 1].i : -1;
+  }
+  const editAnim: any = allAnims[editIdx] || null;
+  // 没有动画时仍给一个合理的默认值，供「添加动画」按钮使用
+  const pick = {
+    cls: editAnim?.presetClass || 'entr',
+    type: editAnim?.type || (ANIM_TYPES.entr[0] || {}).value,
+    trigger: editAnim ? normTrigger(editAnim.trigger) : 'afterPrev',
+    direction: editAnim?.direction || (ANIM_DIRECTIONS[0] || {}).value,
+    duration: editAnim?.duration ?? 500
+  };
+  const patchAnim = (p: any) => {
+    Object.assign(pick, p);
+    if (editIdx >= 0 && editIdx < allAnims.length) {
+      animEditIndex = editIdx;
+      runAction(() => actions.updateAnimation(editIdx, p));
+    }
+  };
   if (!mine.length) inspectorEl.append(h('div', { class: 'empty' }, [t('insp.noAnimOnEl')]));
   for (const x of mine) {
     inspectorEl.append(
-      h('div', { class: 'row' }, [
+      h('div', {
+        class: 'row anim-row' + (x.i === editIdx ? ' on' : ''),
+        style: 'cursor:pointer',
+        onclick: () => {
+          animEditIndex = x.i;
+          renderInspector();
+          ribbon.sync(ribbonState());
+        }
+      }, [
         h('span', { style: 'flex:1;font-size:11px' }, [animLabel(x.a)]),
-        h('button', { class: 'btn', type: 'button', title: t('insp.animRemove'), onclick: () => runAction(() => actions.removeAnimation(x.i)) }, ['✕'])
+        h('button', {
+          class: 'btn', type: 'button', title: t('insp.animRemove'),
+          onclick: (e: any) => {
+            e.stopPropagation();
+            animEditIndex = -1;
+            runAction(() => actions.removeAnimation(x.i));
+          }
+        }, ['✕'])
       ])
     );
   }
-  // Default trigger is 'afterPrev' (auto-play when the slide appears) so a freshly added
-  // animation is actually visible during the slideshow without requiring a click first.
-  const pick = { cls: 'entr', type: (ANIM_TYPES.entr[0] || {}).value, trigger: 'afterPrev', direction: (ANIM_DIRECTIONS[0] || {}).value, duration: 500 };
-  const addAnim = () =>
+  const addAnim = () => {
+    animEditIndex = -1;
     runAction(() =>
       actions.addAnimation({
         target: el.id,
@@ -3034,20 +3125,15 @@ function renderElementInspector(el: any) {
         trigger: pick.trigger
       })
     );
+  };
   // Single-click add: the button always adds an animation immediately (no hidden two-step form).
   const addButton = () =>
     h('div', { class: 'row' }, [
       h('button', { class: 'btn', type: 'button', title: t('insp.animAdd'), onclick: addAnim }, ['＋ ' + t('insp.animAdd')])
     ]);
   if (!mine.length) {
-    // Element has no animation yet: keep the panel minimal — one button that adds a default
-    // animation in a single click. The configuration controls below only appear once the
-    // element actually has an animation (the inspector re-renders right after adding), so
-    // elements without animations don't show options that don't apply to them.
     inspectorEl.append(addButton());
   } else {
-    // Animation list exists: also show the configuration controls, so the next animation can
-    // be added with different options (class / type / trigger / direction / duration).
     const typeWrap = h('div', {});
     const renderTypes = () => {
       typeWrap.innerHTML = '';
@@ -3056,7 +3142,7 @@ function renderElementInspector(el: any) {
           t('insp.animType'),
           (ANIM_TYPES[pick.cls] || []).map((x: any) => ({ value: x.value, label: data('animType', x.value, x.name) })),
           pick.type,
-          (v) => (pick.type = v)
+          (v) => patchAnim({ type: v })
         )
       );
     };
@@ -3067,7 +3153,8 @@ function renderElementInspector(el: any) {
         ANIM_CLASSES.map((c: any) => ({ value: c.value, label: data('animClass', c.value, c.name) })),
         pick.cls,
         (v) => {
-          pick.cls = v;
+          const first = ((ANIM_TYPES as any)[v] || [])[0]?.value || pick.type;
+          patchAnim({ presetClass: v, type: first });
           renderTypes();
         }
       )
@@ -3078,7 +3165,7 @@ function renderElementInspector(el: any) {
         t('insp.animTrigger'),
         ['onClick', 'withPrev', 'afterPrev'].map((v) => ({ value: v, label: data('trigger', v, v) })),
         pick.trigger,
-        (v) => (pick.trigger = v)
+        (v) => patchAnim({ trigger: v })
       )
     );
     inspectorEl.append(
@@ -3086,10 +3173,10 @@ function renderElementInspector(el: any) {
         t('insp.animDirection'),
         ANIM_DIRECTIONS.map((d: any) => ({ value: d.value, label: data('animDir', d.value, d.name) })),
         pick.direction,
-        (v) => (pick.direction = v)
+        (v) => patchAnim({ direction: v })
       )
     );
-    inspectorEl.append(numField(t('insp.animDuration'), pick.duration, (v) => (pick.duration = Math.max(0, Math.round(v)))));
+    inspectorEl.append(numField(t('insp.animDuration'), pick.duration, (v) => patchAnim({ duration: Math.max(0, Math.round(v)) })));
     inspectorEl.append(addButton());
   }
 }
@@ -3459,6 +3546,21 @@ async function renderPresent(dir = 1, withTransition = true): Promise<void> {
     }
     if (state.present.global) ensureGlobalStyles(state.present.global);
     layer.innerHTML = state.present.slides[state.current] || '';
+    // 预览模式没有编辑器模型，动画随 pptxToHtml 的 data-timing 下发（每项带 OOXML spid）。
+    // 把 spid 映射成 target 后复用同一套播放逻辑：保存后重新打开（默认预览模式）仍有动画。
+    let previewAnims: any[] = [];
+    try {
+      const slideEl = layer.querySelector('.slide[data-timing]') as HTMLElement | null;
+      const payload = JSON.parse(slideEl?.dataset.timing || '{}');
+      if (Array.isArray(payload.animations)) {
+        previewAnims = payload.animations.map((a: any) => ({
+          ...a,
+          target: String(a.spid ?? a.target ?? ''),
+          trigger: a.trigger || 'onClick'
+        }));
+      }
+    } catch { previewAnims = []; }
+    applyEntranceAnimations(layer, { animations: previewAnims });
   }
 
   presentHostEl.style.width = sz.width + 'px';
@@ -3867,7 +3969,10 @@ function applyEntranceAnimations(layer: HTMLElement, slide: any): void {
   let cum = 0;
   for (const a of anims) {
     const targetId = String(a.target ?? '').replace(/"/g, '\\"');
-    const node = targetId ? (layer.querySelector(`[data-id="${targetId}"]`) as HTMLElement | null) : null;
+    // 编辑模式用 data-id（编辑器元素 id），预览模式用 _id（OOXML spid）
+    const node = targetId
+      ? (layer.querySelector(`[data-id="${targetId}"], [_id="${targetId}"]`) as HTMLElement | null)
+      : null;
     if (!node) continue;
     const kf = entranceKeyframes(a);
     // prime the hidden/start state before the layer becomes visible (no flash)
@@ -3877,7 +3982,7 @@ function applyEntranceAnimations(layer: HTMLElement, slide: any): void {
     if (start.clipPath) node.style.clipPath = start.clipPath;
     const dur = animDurationMs(a.duration);
     const opts: KeyframeAnimationOptions = { duration: dur, easing: 'ease', fill: 'both' };
-    const trigger = a.trigger || 'afterPrev';
+    const trigger = normTrigger(a.trigger);
     if (trigger === 'onClick') {
       presentClickAnims.push({ node, kf, opts, cls: a.presetClass || 'entr' });
     } else {
@@ -4128,6 +4233,12 @@ window.addEventListener('message', async (event: MessageEvent<HostToWebview>) =>
         syncChrome();
         break;
       }
+      case 'flush':
+        // 保存前立即把挂起的编辑序列化，避免 Ctrl+S 抢在 350ms 防抖 / 异步序列化之前。
+        // syncBytes 会发出 `sync`，宿主的保存等待由那条消息释放。
+        if (state.mode === 'edit') void syncBytes(store.canUndo());
+        else post({ type: 'flushDone' });
+        break;
       case 'saved':
         state.dirty = false;
         syncChrome();
